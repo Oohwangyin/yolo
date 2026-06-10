@@ -3,7 +3,6 @@ train: images/train
 val: images/test
 test: images/test
 
-
 # Classes
 names:
   0: car

@@ -8,7 +8,6 @@ import shutil
 from collections import Counter
 from pathlib import Path
 
-
 IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff"}
 DEFAULT_NAMES = ["car", "pick-up", "camping car", "truck", "vehicle", "tractor", "boat", "van"]
 
@@ -64,8 +63,7 @@ def prepare_dst(dst: Path, overwrite: bool) -> None:
     if dst.exists():
         if not overwrite and any(dst.iterdir()):
             raise FileExistsError(
-                f"Destination exists and is not empty: {dst}\n"
-                "Use --overwrite if you want to recreate it."
+                f"Destination exists and is not empty: {dst}\nUse --overwrite if you want to recreate it."
             )
         if overwrite:
             shutil.rmtree(dst)

@@ -22,9 +22,8 @@ class PGHeadEnhance(nn.Module):
         c1 (int): Input channels, auto-filled from YAML parse_model.
         conv_channels (int | None): Intermediate conv channels. Defaults to c1.
         num_convs (int): Number of 3x3 Conv layers before prediction.
-
-    Shape:
-        Input:  (B, C, H, W)
+        Shape:
+        Input: (B, C, H, W)
         Output: (B, C, H, W)
     """
 
