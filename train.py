@@ -1,18 +1,18 @@
 from ultralytics import YOLO
 
-model = YOLO("yolov8s-PRN.yaml")
+model = YOLO("yolov8s-PGM.yaml")
 
 model.train(
     data="VisDrone.yaml",
     epochs=200,
     batch=16,
     imgsz=640,
-    patience=50,
+    patience=30,
     optimizer="SGD",
     pretrained=False,
     cos_lr=True,
     close_mosaic=20,
-    project="VisDrone/yolov8s-PRN",
+    project="VisDrone/yolov8s-PGM",
 )
 
 # model = YOLO("yolov8s.yaml")

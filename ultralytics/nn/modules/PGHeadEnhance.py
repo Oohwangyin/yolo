@@ -49,6 +49,12 @@ class PGHeadEnhance(nn.Module):
         nn.init.xavier_normal_(self.pred_net.weight)
         nn.init.constant_(self.pred_net.bias, 0)
 
+    def __getstate__(self):
+        """Drop transient graph tensors when PyTorch deep-copies the model for EMA."""
+        state = super().__getstate__()
+        state["guidance_logits"] = None
+        return state
+
     def forward(self, x):
         """Enhance features and cache the logits used for position supervision."""
         feat = x

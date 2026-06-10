@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 
+from typing import Optional
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -45,6 +47,8 @@ __all__ = (
     "HGBlock",
     "HGStem",
     "ImagePoolingAttn",
+    "MGAM",
+    "MCGAM",
     "Proto",
     "RepC3",
     "RepNCSPELAN4",
@@ -1064,6 +1068,154 @@ class C3f(nn.Module):
         y = [self.cv2(x), self.cv1(x)]
         y.extend(m(y[-1]) for m in self.m)
         return self.cv3(torch.cat(y, 1))
+
+
+class MGAM(nn.Module):
+    """Multiscale Gaussian attention adapted for YOLO feature maps."""
+
+    def __init__(
+        self,
+        c1: int,
+        c2: int,
+        kernels: tuple[int, ...] | list[int] | int = (1, 3, 5, 7),
+        use_dw: bool = True,
+        channel_sigma: float = 0.5,
+        spatial_sigma: float = 0.5,
+        eps: float = 1e-6,
+        gamma_init: Optional[float] = None,
+    ):
+        """Initialize MGAM."""
+        super().__init__()
+        kernels = (kernels,) if isinstance(kernels, int) else tuple(kernels)
+        self.eps = eps
+        self.channel_sigma = channel_sigma
+        self.spatial_sigma = spatial_sigma
+        self.gamma = None if gamma_init is None else nn.Parameter(torch.tensor(float(gamma_init)))
+        self.proj = Conv(c1, c2, 1, 1) if c1 != c2 else nn.Identity()
+        self.branches = nn.ModuleList(
+            Conv(c2, c2, k, 1) if (k == 1 or not use_dw) else DWConv(c2, c2, k, 1) for k in kernels
+        )
+        self.fuse = Conv(c2, c2, 1, 1)
+        self.avg_pool = nn.AdaptiveAvgPool2d(1)
+        self.max_pool = nn.AdaptiveMaxPool2d(1)
+
+    def _channel_gaussian(self, x: torch.Tensor) -> torch.Tensor:
+        """Apply Gaussian attention along channels around the strongest response."""
+        b, c, _, _ = x.shape
+        score = self.avg_pool(x) + self.max_pool(x)
+        center = score.flatten(1).argmax(dim=1).to(dtype=x.dtype).view(b, 1, 1, 1)
+        pos = torch.arange(c, device=x.device, dtype=x.dtype).view(1, c, 1, 1)
+        sigma = max(float(c) * self.channel_sigma, 1.0)
+        weight = torch.exp(-0.5 * ((pos - center) / sigma).pow(2))
+        weight = weight / weight.amax(dim=1, keepdim=True).clamp_min(self.eps)
+        return x * weight
+
+    def _spatial_gaussian(self, x: torch.Tensor) -> torch.Tensor:
+        """Apply Gaussian attention in space around the strongest response."""
+        b, _, h, w = x.shape
+        score = x.mean(dim=1, keepdim=True) + x.amax(dim=1, keepdim=True)
+        index = score.flatten(2).argmax(dim=2).to(dtype=x.dtype)
+        cy = (index // w).view(b, 1, 1, 1)
+        cx = (index % w).view(b, 1, 1, 1)
+        yy = torch.arange(h, device=x.device, dtype=x.dtype).view(1, 1, h, 1)
+        xx = torch.arange(w, device=x.device, dtype=x.dtype).view(1, 1, 1, w)
+        sigma_y = max(float(h) * self.spatial_sigma, 1.0)
+        sigma_x = max(float(w) * self.spatial_sigma, 1.0)
+        weight = torch.exp(-0.5 * (((yy - cy) / sigma_y).pow(2) + ((xx - cx) / sigma_x).pow(2)))
+        weight = weight / weight.amax(dim=(2, 3), keepdim=True).clamp_min(self.eps)
+        return x * weight
+
+    def _heat_map(self, x: torch.Tensor) -> torch.Tensor:
+        """Compute a normalized single-channel heat map."""
+        heat = x.mean(dim=1, keepdim=True)
+        heat_min = heat.amin(dim=(2, 3), keepdim=True)
+        heat_max = heat.amax(dim=(2, 3), keepdim=True)
+        return (heat - heat_min) / (heat_max - heat_min).clamp_min(self.eps)
+
+    def _branch_weight(self, x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
+        """Measure branch response difference from the base feature heat map."""
+        return (self._heat_map(x) - self._heat_map(y)).abs().mean(dim=(2, 3), keepdim=True) + self.eps
+
+    @staticmethod
+    def _weighted_sum(features: list[torch.Tensor], weights: list[torch.Tensor]) -> torch.Tensor:
+        """Fuse branch features with per-image dynamic weights."""
+        weight = torch.stack(weights, dim=1)
+        weight = weight / weight.sum(dim=1, keepdim=True)
+        return (torch.stack(features, dim=1) * weight).sum(dim=1)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Enhance a YOLO feature map with multiscale Gaussian attention."""
+        x = self.proj(x)
+        channel_features, channel_weights = [], []
+        spatial_features, spatial_weights = [], []
+        for branch in self.branches:
+            feat = branch(x)
+            channel_feat = self._channel_gaussian(feat)
+            spatial_feat = self._spatial_gaussian(feat)
+            channel_features.append(channel_feat)
+            spatial_features.append(spatial_feat)
+            channel_weights.append(self._branch_weight(x, channel_feat))
+            spatial_weights.append(self._branch_weight(x, spatial_feat))
+        y = self._weighted_sum(channel_features, channel_weights) + self._weighted_sum(spatial_features, spatial_weights)
+        y = self.fuse(y)
+        return x + y if self.gamma is None else x + self.gamma * y
+
+
+class MCGAM(MGAM):
+    """Multi-center MGAM with top-k spatial Gaussian attention."""
+
+    def __init__(
+        self,
+        c1: int,
+        c2: int,
+        kernels: tuple[int, ...] | list[int] | int = (1, 3, 5, 7),
+        use_dw: bool = True,
+        channel_sigma: float = 0.5,
+        spatial_sigma: float = 0.5,
+        eps: float = 1e-6,
+        gamma_init: Optional[float] = 0.0,
+        topk: int = 4,
+        nms_kernel: int = 3,
+        spatial_fuse: str = "union",
+    ):
+        """Initialize MCGAM."""
+        super().__init__(c1, c2, kernels, use_dw, channel_sigma, spatial_sigma, eps, gamma_init)
+        self.topk = max(int(topk), 1)
+        self.nms_kernel = max(int(nms_kernel), 1)
+        if self.nms_kernel % 2 == 0:
+            self.nms_kernel += 1
+        if spatial_fuse not in {"union", "sum"}:
+            raise ValueError(f"Unsupported MCGAM spatial_fuse='{spatial_fuse}'")
+        self.spatial_fuse = spatial_fuse
+
+    def _spatial_gaussian(self, x: torch.Tensor) -> torch.Tensor:
+        """Apply top-k multi-center Gaussian attention in space."""
+        b, _, h, w = x.shape
+        score = x.mean(dim=1, keepdim=True) + x.amax(dim=1, keepdim=True)
+        if self.nms_kernel > 1:
+            local_max = F.max_pool2d(score, self.nms_kernel, stride=1, padding=self.nms_kernel // 2)
+            score = score.masked_fill(score < local_max, torch.finfo(score.dtype).min)
+
+        k = min(self.topk, h * w)
+        center_score, center_index = score.flatten(2).topk(k, dim=2)
+        center_score = center_score.squeeze(1)
+        center_index = center_index.squeeze(1)
+
+        cy = (center_index // w).to(dtype=x.dtype).view(b, k, 1, 1)
+        cx = (center_index % w).to(dtype=x.dtype).view(b, k, 1, 1)
+        yy = torch.arange(h, device=x.device, dtype=x.dtype).view(1, 1, h, 1)
+        xx = torch.arange(w, device=x.device, dtype=x.dtype).view(1, 1, 1, w)
+        sigma_y = max(float(h) * self.spatial_sigma, 1.0)
+        sigma_x = max(float(w) * self.spatial_sigma, 1.0)
+        gaussian = torch.exp(-0.5 * (((yy - cy) / sigma_y).pow(2) + ((xx - cx) / sigma_x).pow(2)))
+
+        alpha = center_score.softmax(dim=1).view(b, k, 1, 1)
+        if self.spatial_fuse == "sum":
+            weight = (alpha * gaussian).sum(dim=1, keepdim=True)
+        else:
+            weight = 1.0 - torch.prod((1.0 - alpha * gaussian).clamp(0.0, 1.0), dim=1, keepdim=True)
+        weight = weight / weight.amax(dim=(2, 3), keepdim=True).clamp_min(self.eps)
+        return x * weight
 
 
 class C3k2(C2f):
