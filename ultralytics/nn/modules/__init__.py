@@ -94,6 +94,7 @@ from .head import (
     YOLOESegment26,
     v10Detect,
 )
+from .PGHeadEnhance import PGHeadEnhance
 from .transformer import (
     AIFI,
     MLP,
@@ -106,7 +107,6 @@ from .transformer import (
     TransformerEncoderLayer,
     TransformerLayer,
 )
-from .PGHeadEnhance import PGHeadEnhance
 
 __all__ = (
     "AIFI",

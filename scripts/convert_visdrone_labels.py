@@ -9,7 +9,6 @@ from pathlib import Path
 
 from PIL import Image
 
-
 SPLITS = ("VisDrone2019-DET-train", "VisDrone2019-DET-val", "VisDrone2019-DET-test-dev")
 IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png", ".bmp"}
 

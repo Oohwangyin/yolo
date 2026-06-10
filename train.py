@@ -26,5 +26,3 @@ model.train(
 #     optimizer="SGD",
 #     pretrained=False,
 # )
-
-
