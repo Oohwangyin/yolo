@@ -367,13 +367,6 @@ class v8DetectionLoss:
         )
         self.bbox_loss = BboxLoss(m.reg_max).to(device)
         self.proj = torch.arange(m.reg_max, dtype=torch.float, device=device)
-        self.pgm_modules = [module for module in model.modules() if module.__class__.__name__ == "PGHeadEnhance"]
-        self.pgm_loss_weight = float(getattr(h, "pgm_loss_weight", 1.0))
-        self.pgm_loss_layer_weight = float(getattr(h, "pgm_loss_layer_weight", 10.0))
-        self.pgm_loss_gamma = float(getattr(h, "pgm_loss_gamma", 1.2))
-        self.pgm_loss_alpha = float(getattr(h, "pgm_loss_alpha", 0.25))
-        self.pgm_center_coeff = float(getattr(h, "pgm_center_coeff", 1.0))
-        self.pgm_obj_scale_factor = float(getattr(h, "pgm_obj_scale_factor", 4.0))
 
     def preprocess(self, targets: torch.Tensor, batch_size: int, scale_tensor: torch.Tensor) -> torch.Tensor:
         """Preprocess targets by converting to tensor format and scaling coordinates."""
@@ -466,82 +459,6 @@ class v8DetectionLoss:
             loss.detach(),
         )  # loss(box, cls, dfl)
 
-    def pgm_sigmoid_focal_loss(self, logits: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
-        """Compute sigmoid focal loss for PGM position-map logits."""
-        bce = F.binary_cross_entropy_with_logits(logits, target, reduction="none")
-        prob = logits.sigmoid()
-        pt = target * prob + (1.0 - target) * (1.0 - prob)
-        loss = bce * ((1.0 - pt) ** self.pgm_loss_gamma)
-        if self.pgm_loss_alpha >= 0:
-            alpha = target * self.pgm_loss_alpha + (1.0 - target) * (1.0 - self.pgm_loss_alpha)
-            loss = loss * alpha
-        return loss.mean()
-
-    def build_pgm_guidance_target(
-        self, logits: torch.Tensor, batch: dict[str, torch.Tensor], img_hw: tuple[int, int]
-    ) -> torch.Tensor:
-        """Build small-object position targets for one PGM feature map."""
-        batch_size, _, feat_h, feat_w = logits.shape
-        target = logits.new_zeros((batch_size, 1, feat_h, feat_w))
-        if batch["bboxes"].numel() == 0:
-            return target
-
-        img_h, img_w = img_hw
-        stride_y = float(img_h) / feat_h
-        stride_x = float(img_w) / feat_w
-        stride = (stride_x + stride_y) / 2.0
-        max_scale = stride * self.pgm_obj_scale_factor
-
-        bboxes = batch["bboxes"].to(device=logits.device, dtype=logits.dtype)
-        batch_idx = batch["batch_idx"].to(device=logits.device).long().view(-1)
-        centers = bboxes[:, :2] * logits.new_tensor([img_w, img_h])
-        sizes = bboxes[:, 2:4] * logits.new_tensor([img_w, img_h])
-        scales = torch.sqrt((sizes[:, 0] * sizes[:, 1]).clamp(min=0))
-        valid = (scales > 0) & (scales < max_scale)
-        if not valid.any():
-            return target
-
-        grid_y = (torch.arange(feat_h, device=logits.device, dtype=logits.dtype) + 0.5) * stride_y
-        grid_x = (torch.arange(feat_w, device=logits.device, dtype=logits.dtype) + 0.5) * stride_x
-        yy, xx = torch.meshgrid(grid_y, grid_x, indexing="ij")
-
-        for img_i in range(batch_size):
-            obj_mask = valid & (batch_idx == img_i)
-            if not obj_mask.any():
-                continue
-            obj_centers = centers[obj_mask]
-            obj_scales = scales[obj_mask] * self.pgm_center_coeff
-            dist = torch.sqrt(
-                (xx.unsqueeze(0) - obj_centers[:, 0].view(-1, 1, 1)).pow(2)
-                + (yy.unsqueeze(0) - obj_centers[:, 1].view(-1, 1, 1)).pow(2)
-            )
-            target[img_i, 0] = (dist < obj_scales.view(-1, 1, 1)).any(0).to(target.dtype)
-        return target
-
-    def pgm_guidance_loss(self, preds: dict[str, torch.Tensor], batch: dict[str, torch.Tensor]) -> torch.Tensor:
-        """Calculate auxiliary PGM position-map loss for all PGHeadEnhance modules."""
-        if not self.pgm_modules or self.pgm_loss_weight <= 0:
-            return torch.zeros((), device=self.device)
-
-        if "img" in batch:
-            img_hw = tuple(int(x) for x in batch["img"].shape[2:])
-        else:
-            feat_hw = preds["feats"][0].shape[2:]
-            img_hw = (int(feat_hw[0] * self.stride[0]), int(feat_hw[1] * self.stride[0]))
-
-        losses = []
-        for module in self.pgm_modules:
-            logits = getattr(module, "guidance_logits", None)
-            if logits is None:
-                continue
-            target = self.build_pgm_guidance_target(logits, batch, img_hw)
-            losses.append(self.pgm_sigmoid_focal_loss(logits, target) * self.pgm_loss_layer_weight)
-            module.guidance_logits = None
-
-        if not losses:
-            return torch.zeros((), device=self.device)
-        return sum(losses) * self.pgm_loss_weight
-
     def parse_output(
         self, preds: dict[str, torch.Tensor] | tuple[torch.Tensor, dict[str, torch.Tensor]]
     ) -> torch.Tensor:
@@ -560,10 +477,6 @@ class v8DetectionLoss:
         """Calculate detection loss using assigned targets."""
         batch_size = preds["boxes"].shape[0]
         loss, loss_detach = self.get_assigned_targets_and_loss(preds, batch)[1:]
-        guidance_loss = self.pgm_guidance_loss(preds, batch)
-        if self.pgm_modules:
-            loss = torch.cat((loss, guidance_loss.view(1)))
-            loss_detach = torch.cat((loss_detach, guidance_loss.detach().view(1)))
         return loss * batch_size, loss_detach
 
 

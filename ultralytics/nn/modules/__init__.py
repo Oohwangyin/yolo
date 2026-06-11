@@ -78,6 +78,7 @@ from .conv import (
     RepConv,
     SpatialAttention,
 )
+from .fdconv import FDConv
 from .head import (
     OBB,
     OBB26,
@@ -156,6 +157,7 @@ __all__ = (
     "DeformableTransformerDecoder",
     "DeformableTransformerDecoderLayer",
     "Detect",
+    "FDConv",
     "Focus",
     "GhostBottleneck",
     "GhostConv",
