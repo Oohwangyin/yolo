@@ -1,0 +1,45 @@
+# Ultralytics AGPL-3.0 License - https://ultralytics.com/license
+
+# YOLOv8s-MCGAM-headP3: isolate MCGAM on the final P3 detection feature.
+#
+# Compared with yolov8s-MCGAM.yaml, this keeps the backbone and the P4/P5
+# construction path close to the YOLOv8s baseline. MCGAM only enhances the P3
+# tensor used by Detect, so the ablation answers whether MCGAM helps the
+# small-object branch without perturbing the rest of the feature pyramid.
+
+nc: 80 # number of classes
+depth_multiple: 0.33
+width_multiple: 0.50
+
+backbone:
+  # [from, repeats, module, args]
+  - [-1, 1, Conv, [64, 3, 2]] # 0-P1/2
+  - [-1, 1, Conv, [128, 3, 2]] # 1-P2/4
+  - [-1, 3, C2f, [128, True]] # 2
+  - [-1, 1, Conv, [256, 3, 2]] # 3-P3/8
+  - [-1, 6, C2f, [256, True]] # 4
+  - [-1, 1, Conv, [512, 3, 2]] # 5-P4/16
+  - [-1, 6, C2f, [512, True]] # 6
+  - [-1, 1, Conv, [1024, 3, 2]] # 7-P5/32
+  - [-1, 3, C2f, [1024, True]] # 8
+  - [-1, 1, SPPF, [1024, 5]] # 9
+
+head:
+  - [-1, 1, nn.Upsample, [None, 2, "nearest"]]
+  - [[-1, 6], 1, Concat, [1]] # cat backbone P4
+  - [-1, 3, C2f, [512]] # 12-P4/16
+
+  - [-1, 1, nn.Upsample, [None, 2, "nearest"]]
+  - [[-1, 4], 1, Concat, [1]] # cat backbone P3
+  - [-1, 3, C2f, [256]] # 15-P3/8-small
+  - [-1, 1, MCGAM, [256, [1, 3, 5, 7], True, 0.5, 0.3, 0.000001, 0.0, 4, 3, "union"]] # 16-P3/8-small
+
+  - [15, 1, Conv, [256, 3, 2]]
+  - [[-1, 12], 1, Concat, [1]] # cat head P4
+  - [-1, 3, C2f, [512]] # 19-P4/16-medium
+
+  - [-1, 1, Conv, [512, 3, 2]]
+  - [[-1, 9], 1, Concat, [1]] # cat backbone P5
+  - [-1, 3, C2f, [1024]] # 22-P5/32-large
+
+  - [[16, 19, 22], 1, Detect, [nc]] # Detect(MCGAM-P3, P4, P5)
