@@ -114,6 +114,26 @@ class BboxLoss(nn.Module):
         """Initialize the BboxLoss module with regularization maximum and DFL settings."""
         super().__init__()
         self.dfl_loss = DFLoss(reg_max) if reg_max > 1 else None
+        self.ciou_weight = 0.5
+        self.nwd_weight = 0.5
+        self.nwd_constant = 12.8
+
+    def normalized_wasserstein_loss(
+        self, pred_bboxes: torch.Tensor, target_bboxes: torch.Tensor, stride: torch.Tensor
+    ) -> torch.Tensor:
+        """Compute Normalized Wasserstein Distance loss for xyxy boxes."""
+        pred_bboxes = pred_bboxes * stride
+        target_bboxes = target_bboxes * stride
+
+        pred_center = (pred_bboxes[..., :2] + pred_bboxes[..., 2:]) * 0.5
+        target_center = (target_bboxes[..., :2] + target_bboxes[..., 2:]) * 0.5
+        pred_wh = (pred_bboxes[..., 2:] - pred_bboxes[..., :2]).clamp_(min=1e-7)
+        target_wh = (target_bboxes[..., 2:] - target_bboxes[..., :2]).clamp_(min=1e-7)
+
+        center_distance = (pred_center - target_center).pow(2).sum(-1, keepdim=True)
+        wh_distance = (pred_wh - target_wh).pow(2).sum(-1, keepdim=True) * 0.25
+        wasserstein_distance = torch.sqrt((center_distance + wh_distance).clamp_(min=1e-7))
+        return 1.0 - torch.exp(-wasserstein_distance / self.nwd_constant)
 
     def forward(
         self,
@@ -127,10 +147,14 @@ class BboxLoss(nn.Module):
         imgsz: torch.Tensor,
         stride: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Compute IoU and DFL losses for bounding boxes."""
+        """Compute mixed CIoU/NWD and DFL losses for bounding boxes."""
         weight = target_scores.sum(-1)[fg_mask].unsqueeze(-1)
-        iou = bbox_iou(pred_bboxes[fg_mask], target_bboxes[fg_mask], xywh=False, CIoU=True)
-        loss_iou = ((1.0 - iou) * weight).sum() / target_scores_sum
+        pred_bboxes_pos = pred_bboxes[fg_mask]
+        target_bboxes_pos = target_bboxes[fg_mask]
+        iou = bbox_iou(pred_bboxes_pos, target_bboxes_pos, xywh=False, CIoU=True)
+        loss_ciou = 1.0 - iou
+        loss_nwd = self.normalized_wasserstein_loss(pred_bboxes_pos, target_bboxes_pos, stride[fg_mask])
+        loss_iou = ((self.ciou_weight * loss_ciou + self.nwd_weight * loss_nwd) * weight).sum() / target_scores_sum
 
         # DFL loss
         if self.dfl_loss:
