@@ -153,7 +153,8 @@ class BboxLoss(nn.Module):
         target_bboxes_pos = target_bboxes[fg_mask]
         iou = bbox_iou(pred_bboxes_pos, target_bboxes_pos, xywh=False, CIoU=True)
         loss_ciou = 1.0 - iou
-        loss_nwd = self.normalized_wasserstein_loss(pred_bboxes_pos, target_bboxes_pos, stride[fg_mask])
+        stride_pos = stride.view(1, -1, 1).expand(pred_bboxes.shape[0], -1, -1)[fg_mask]
+        loss_nwd = self.normalized_wasserstein_loss(pred_bboxes_pos, target_bboxes_pos, stride_pos)
         loss_iou = ((self.ciou_weight * loss_ciou + self.nwd_weight * loss_nwd) * weight).sum() / target_scores_sum
 
         # DFL loss
