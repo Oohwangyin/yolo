@@ -145,6 +145,7 @@ class KernelSpatialModulationGlobal(nn.Module):
         raise NotImplementedError(f"Unsupported kernel activation: {self.act_type}")
 
     def forward(self, x):
+        x = x.to(dtype=self.fc.weight.dtype)
         x = self.relu(self.norm(self.fc(x)))
         return self.func_channel(x), self.func_filter(x), self.func_spatial(x), self.func_kernel(x)
 
@@ -166,12 +167,13 @@ class KernelSpatialModulationLocal(nn.Module):
         self.norm = nn.LayerNorm(c1)
 
     def forward(self, x):
-        x = x.squeeze(-1).transpose(-1, -2)
+        x = x.squeeze(-1).transpose(-1, -2).to(dtype=self.conv.weight.dtype)
         if self.use_global:
             x_rfft = torch.fft.rfft(x.float(), dim=-1)
             x_real = x_rfft.real * self.complex_weight[..., 0][None]
             x_imag = x_rfft.imag * self.complex_weight[..., 1][None]
             x = x + torch.fft.irfft(torch.view_as_complex(torch.stack((x_real, x_imag), dim=-1)), dim=-1)
+            x = x.to(dtype=self.conv.weight.dtype)
         x = self.norm(x)
         x = self.conv(x).reshape(x.size(0), self.kernel_num, self.out_n, self.c1)
         return x.permute(0, 1, 3, 2)
@@ -238,14 +240,16 @@ class FrequencyBandModulation(nn.Module):
             low_part = torch.fft.irfft2(x_fft * current_masks[idx], s=(h, w), norm="ortho")
             high_part = pre_x - low_part
             pre_x = low_part
-            freq_weight = self.sp_act(self.freq_weight_conv_list[idx](att_feat.float()))
+            conv = self.freq_weight_conv_list[idx]
+            freq_weight = self.sp_act(conv(att_feat.to(dtype=conv.weight.dtype))).float()
             tmp = freq_weight.reshape(b, self.spatial_group, -1, h, w) * high_part.reshape(
                 b, self.spatial_group, -1, h, w
             )
             x_list.append(tmp.reshape(b, -1, h, w))
 
         if self.lowfreq_att:
-            freq_weight = self.sp_act(self.freq_weight_conv_list[len(self.k_list)](att_feat.float()))
+            conv = self.freq_weight_conv_list[len(self.k_list)]
+            freq_weight = self.sp_act(conv(att_feat.to(dtype=conv.weight.dtype))).float()
             tmp = freq_weight.reshape(b, self.spatial_group, -1, h, w) * pre_x.reshape(
                 b, self.spatial_group, -1, h, w
             )
@@ -365,8 +369,16 @@ class FrequencyDynamicConv2d(nn.Conv2d):
         x = x.float()
         global_x = F.adaptive_avg_pool2d(x, 1)
         channel_attention, filter_attention, spatial_attention, kernel_attention = self.KSM_Global(global_x)
+        if not isinstance(channel_attention, float):
+            channel_attention = channel_attention.float()
+        if not isinstance(filter_attention, float):
+            filter_attention = filter_attention.float()
+        if not isinstance(spatial_attention, float):
+            spatial_attention = spatial_attention.float()
+        if not isinstance(kernel_attention, float):
+            kernel_attention = kernel_attention.float()
         if self.use_ksm_local:
-            hr_att = self.KSM_Local(global_x).reshape(
+            hr_att = self.KSM_Local(global_x).float().reshape(
                 x.size(0), 1, self.in_channels, self.out_channels, self.kernel_size[0], self.kernel_size[1]
             )
             hr_att = hr_att.permute(0, 1, 3, 2, 4, 5)
@@ -456,7 +468,8 @@ class FDConv(nn.Module):
         self.act = Conv.default_act if act is True else act if isinstance(act, nn.Module) else nn.Identity()
 
     def forward(self, x):
-        return self.act(self.bn(self.conv(x)))
+        x = self.conv(x)
+        return self.act(self.bn(x.to(dtype=self.bn.weight.dtype)))
 
     def forward_fuse(self, x):
         return self.forward(x)

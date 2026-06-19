@@ -79,6 +79,8 @@ from .conv import (
     SpatialAttention,
 )
 from .fdconv import FDConv
+from .fem import FEM
+from .rfaconv import RFAConv
 from .head import (
     OBB,
     OBB26,
@@ -158,6 +160,7 @@ __all__ = (
     "DeformableTransformerDecoderLayer",
     "Detect",
     "FDConv",
+    "FEM",
     "Focus",
     "GhostBottleneck",
     "GhostConv",
@@ -183,6 +186,7 @@ __all__ = (
     "RepNCSPELAN4",
     "RepVGGDW",
     "ResNetLayer",
+    "RFAConv",
     "SCDown",
     "Segment",
     "Segment26",
