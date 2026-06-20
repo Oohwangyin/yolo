@@ -12,7 +12,7 @@ model.train(
     pretrained=False,
     cos_lr=True,
     close_mosaic=20,
-    project="VisDrone/yolov8s-NWD",
+    project="VisDrone/yolov8s-GCD",
 )
 
 # model = YOLO("yolov8s.yaml")

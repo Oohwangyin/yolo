@@ -114,36 +114,6 @@ class BboxLoss(nn.Module):
         """Initialize the BboxLoss module with regularization maximum and DFL settings."""
         super().__init__()
         self.dfl_loss = DFLoss(reg_max) if reg_max > 1 else None
-        self.ciou_weight = 0.8
-        self.gcd_weight = 0.2
-
-    @staticmethod
-    def gaussian_combined_distance_loss(
-        pred_bboxes: torch.Tensor, target_bboxes: torch.Tensor, eps: float = 1e-7
-    ) -> torch.Tensor:
-        """Compute Gaussian Combined Distance loss for xyxy boxes."""
-        pred_center = (pred_bboxes[..., :2] + pred_bboxes[..., 2:]) * 0.5
-        target_center = (target_bboxes[..., :2] + target_bboxes[..., 2:]) * 0.5
-        center_delta = pred_center - target_center
-
-        pred_wh = (pred_bboxes[..., 2:] - pred_bboxes[..., :2]).clamp(min=eps)
-        target_wh = (target_bboxes[..., 2:] - target_bboxes[..., :2]).clamp(min=eps)
-        pred_w, pred_h = pred_wh.chunk(2, dim=-1)
-        target_w, target_h = target_wh.chunk(2, dim=-1)
-        delta_w, delta_h = (pred_wh - target_wh).chunk(2, dim=-1)
-
-        center_distance_pred = (center_delta[..., 0:1] / pred_w).pow(2) + (
-            center_delta[..., 1:2] / pred_h
-        ).pow(2)
-        center_distance_target = (center_delta[..., 0:1] / target_w).pow(2) + (
-            center_delta[..., 1:2] / target_h
-        ).pow(2)
-        wh_distance_pred = (delta_w / pred_w).pow(2).add((delta_h / pred_h).pow(2)) * 0.25
-        wh_distance_target = (delta_w / target_w).pow(2).add((delta_h / target_h).pow(2)) * 0.25
-
-        gcd_distance = (center_distance_pred + center_distance_target + wh_distance_pred + wh_distance_target) * 0.5
-        gcd_similarity = torch.exp(-torch.sqrt(gcd_distance.clamp(min=eps)))
-        return 1.0 - gcd_similarity
 
     def forward(
         self,
@@ -157,14 +127,10 @@ class BboxLoss(nn.Module):
         imgsz: torch.Tensor,
         stride: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Compute mixed CIoU/GCD and DFL losses for bounding boxes."""
+        """Compute IoU and DFL losses for bounding boxes."""
         weight = target_scores.sum(-1)[fg_mask].unsqueeze(-1)
-        pred_bboxes_pos = pred_bboxes[fg_mask]
-        target_bboxes_pos = target_bboxes[fg_mask]
-        iou = bbox_iou(pred_bboxes_pos, target_bboxes_pos, xywh=False, CIoU=True)
-        loss_ciou = 1.0 - iou
-        loss_gcd = self.gaussian_combined_distance_loss(pred_bboxes_pos, target_bboxes_pos)
-        loss_iou = ((self.ciou_weight * loss_ciou + self.gcd_weight * loss_gcd) * weight).sum() / target_scores_sum
+        iou = bbox_iou(pred_bboxes[fg_mask], target_bboxes[fg_mask], xywh=False, CIoU=True)
+        loss_iou = ((1.0 - iou) * weight).sum() / target_scores_sum
 
         # DFL loss
         if self.dfl_loss:
