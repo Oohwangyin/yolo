@@ -70,6 +70,7 @@ from ultralytics.nn.modules import (
     RFAConv,
     RTDETRDecoder,
     SCDown,
+    SHAB,
     Segment,
     Segment26,
     SemanticSegment,
@@ -1717,6 +1718,7 @@ def parse_model(d, ch, verbose=True):
             RepC3,
             PSA,
             SCDown,
+            SHAB,
             C2fCIB,
             A2C2f,
         }
@@ -1734,6 +1736,7 @@ def parse_model(d, ch, verbose=True):
             C3Ghost,
             C3x,
             RepC3,
+            SHAB,
             C2fPSA,
             C2fCIB,
             C2PSA,

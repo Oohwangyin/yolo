@@ -55,6 +55,7 @@ __all__ = (
     "RepVGGDW",
     "ResNetLayer",
     "SCDown",
+    "SHAB",
     "TorchVision",
 )
 
@@ -321,6 +322,108 @@ class C2f(nn.Module):
         y = [y[0], y[1]]
         y.extend(m(y[-1]) for m in self.m)
         return self.cv2(torch.cat(y, 1))
+
+
+class _SHABConvBN(nn.Sequential):
+    """Convolution followed by batch normalization for SHAB internals."""
+
+    def __init__(
+        self,
+        c1: int,
+        c2: int,
+        k: int = 1,
+        s: int = 1,
+        p: int = 0,
+        d: int = 1,
+        g: int = 1,
+        bn_weight_init: float = 1.0,
+    ):
+        """Initialize convolution and batch normalization layers."""
+        super().__init__()
+        self.add_module("conv", nn.Conv2d(c1, c2, k, s, p, d, g, bias=False))
+        self.add_module("bn", nn.BatchNorm2d(c2))
+        nn.init.constant_(self.bn.weight, bn_weight_init)
+        nn.init.constant_(self.bn.bias, 0)
+
+
+class _SHABResidual(nn.Module):
+    """Residual wrapper used by SHAB blocks."""
+
+    def __init__(self, fn: nn.Module):
+        """Initialize the wrapped residual function."""
+        super().__init__()
+        self.fn = fn
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Apply residual addition."""
+        return self.fn(x) + x
+
+
+class _SHABGroupNorm(nn.GroupNorm):
+    """Group normalization with a single group for SHSA."""
+
+    def __init__(self, num_channels: int, **kwargs):
+        """Initialize single-group normalization."""
+        super().__init__(1, num_channels, **kwargs)
+
+
+class SHSA(nn.Module):
+    """Single-head self-attention used inside SHAB."""
+
+    def __init__(self, dim: int, qk_dim: int = 16, pdim: int = 64):
+        """Initialize SHSA with partial-channel attention."""
+        super().__init__()
+        self.dim = dim
+        self.pdim = min(pdim, dim)
+        self.qk_dim = min(qk_dim, self.pdim)
+        self.scale = self.qk_dim**-0.5
+
+        self.pre_norm = _SHABGroupNorm(self.pdim)
+        self.qkv = _SHABConvBN(self.pdim, self.qk_dim * 2 + self.pdim)
+        self.proj = nn.Sequential(nn.SiLU(), _SHABConvBN(dim, dim, bn_weight_init=0))
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Apply self-attention to a channel subset and keep the remainder as identity."""
+        b, _, h, w = x.shape
+        x1, x2 = torch.split(x, [self.pdim, self.dim - self.pdim], dim=1)
+        qkv = self.qkv(self.pre_norm(x1))
+        q, k, v = qkv.split([self.qk_dim, self.qk_dim, self.pdim], dim=1)
+        q, k, v = q.flatten(2), k.flatten(2), v.flatten(2)
+
+        attn = (q.transpose(-2, -1) @ k) * self.scale
+        attn = attn.softmax(dim=-1)
+        x1 = (v @ attn.transpose(-2, -1)).reshape(b, self.pdim, h, w)
+        return self.proj(torch.cat([x1, x2], dim=1))
+
+
+class SHSABlock(nn.Module):
+    """Spatial hierarchical single-head self-attention block."""
+
+    def __init__(self, dim: int, qk_dim: int = 16, pdim: int = 64):
+        """Initialize depthwise convolution, SHSA, and feed-forward branches."""
+        super().__init__()
+        self.conv = _SHABResidual(_SHABConvBN(dim, dim, 3, 1, 1, g=dim, bn_weight_init=0))
+        self.mixer = _SHABResidual(SHSA(dim, qk_dim, pdim))
+        self.ffn = _SHABResidual(
+            nn.Sequential(
+                _SHABConvBN(dim, int(dim * 2)),
+                nn.SiLU(),
+                _SHABConvBN(int(dim * 2), dim, bn_weight_init=0),
+            )
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Forward pass through SHSA block."""
+        return self.ffn(self.mixer(self.conv(x)))
+
+
+class SHAB(C2f):
+    """C2f variant that replaces bottlenecks with lightweight SHSA blocks."""
+
+    def __init__(self, c1: int, c2: int, n: int = 1, shortcut: bool = False, g: int = 1, e: float = 0.5):
+        """Initialize SHAB with the same YAML signature as C2f."""
+        super().__init__(c1, c2, n, shortcut, g, e)
+        self.m = nn.ModuleList(SHSABlock(self.c) for _ in range(n))
 
 
 class C3(nn.Module):
