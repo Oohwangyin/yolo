@@ -114,8 +114,8 @@ class BboxLoss(nn.Module):
         """Initialize the BboxLoss module with regularization maximum and DFL settings."""
         super().__init__()
         self.dfl_loss = DFLoss(reg_max) if reg_max > 1 else None
-        self.ciou_weight = 0.5
-        self.nwd_weight = 0.5
+        self.ciou_weight = 0.8
+        self.nwd_weight = 0.2
         self.nwd_constant = 12.8
 
     def normalized_wasserstein_loss(
