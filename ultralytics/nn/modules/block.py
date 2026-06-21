@@ -43,6 +43,7 @@ __all__ = (
     "CBFuse",
     "CBLinear",
     "ContrastiveHead",
+    "DSAM",
     "GhostBottleneck",
     "HGBlock",
     "HGStem",
@@ -1143,6 +1144,44 @@ class CBFuse(nn.Module):
         target_size = xs[-1].shape[2:]
         res = [F.interpolate(x[self.idx[i]], size=target_size, mode="nearest") for i, x in enumerate(xs[:-1])]
         return torch.sum(torch.stack(res + xs[-1:]), dim=0)
+
+
+class DSAM(nn.Module):
+    """Dual-stream attention module that uses high-level context to enhance a low-level feature map."""
+
+    def __init__(self, c_low, c_high, c_out=None, dilations=(1, 3, 5, 7), shortcut=True):
+        """Initialize DSAM.
+
+        Args:
+            c_low (int): Channels of the low-level feature map to enhance.
+            c_high (int): Channels of the high-level feature map used to generate attention.
+            c_out (int, optional): Output channels. Defaults to c_low.
+            dilations (tuple[int]): Dilation rates for each dual-stream branch.
+            shortcut (bool): Add the enhanced feature back to the low-level input when channels match.
+        """
+        super().__init__()
+        c_out = c_low if c_out is None else c_out
+        self.shortcut = shortcut and c_out == c_low
+        self.attn = nn.Sequential(Conv(c_high, c_out, 1), nn.Conv2d(c_out, 1, 1))
+        self.fg_convs = nn.ModuleList(Conv(c_low, c_out, 1 if d == 1 else 3, d=d) for d in dilations)
+        self.bg_convs = nn.ModuleList(Conv(c_low, c_out, 1 if d == 1 else 3, d=d) for d in dilations)
+        self.out = Conv(c_out * len(dilations) * 2, c_out, 3)
+
+    @staticmethod
+    def _multi_scale_conv(x, branches):
+        """Apply parallel convolutions and concatenate their outputs."""
+        return torch.cat([branch(x) for branch in branches], 1)
+
+    def forward(self, x):
+        """Enhance low-level features with foreground/background attention from high-level features."""
+        low, high = x
+        attn = torch.sigmoid(
+            F.interpolate(self.attn(high), size=low.shape[2:], mode="bilinear", align_corners=False)
+        )
+        fg = self._multi_scale_conv(low * attn, self.fg_convs)
+        bg = self._multi_scale_conv(low * (1 - attn), self.bg_convs)
+        out = self.out(torch.cat((fg, bg), 1))
+        return out + low if self.shortcut else out
 
 
 class C3f(nn.Module):

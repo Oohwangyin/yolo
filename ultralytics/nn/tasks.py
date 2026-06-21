@@ -48,6 +48,7 @@ from ultralytics.nn.modules import (
     Detect,
     DWConv,
     DWConvTranspose2d,
+    DSAM,
     FDConv,
     FEM,
     Focus,
@@ -1792,6 +1793,11 @@ def parse_model(d, ch, verbose=True):
             args = [ch[f]]
         elif m is Concat:
             c2 = sum(ch[x] for x in f)
+        elif m is DSAM:
+            if not isinstance(f, list) or len(f) != 2:
+                raise ValueError("DSAM expects two input layers: [low_level_feature, high_level_feature].")
+            c2 = ch[f[0]]
+            args = [c2, ch[f[1]], *args]
         elif m in frozenset(
             {
                 Detect,
