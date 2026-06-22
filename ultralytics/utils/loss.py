@@ -349,6 +349,7 @@ class v8DetectionLoss:
         self.no = m.nc + m.reg_max * 4
         self.reg_max = m.reg_max
         self.device = device
+        self.boundary_loss_gain = float(getattr(m, "boundary_loss_gain", 0.0))
 
         self.use_dfl = m.reg_max > 1
 
@@ -465,6 +466,44 @@ class v8DetectionLoss:
         """Parse model predictions to extract features."""
         return preds[1] if isinstance(preds, tuple) else preds
 
+    def build_boundary_targets(self, pred_boundary: torch.Tensor, batch: dict[str, torch.Tensor]) -> torch.Tensor:
+        """Create rectangular boundary targets from normalized xywh boxes."""
+        target = torch.zeros_like(pred_boundary)
+        if batch["bboxes"].numel() == 0:
+            return target
+
+        _, _, h, w = pred_boundary.shape
+        batch_idx = batch["batch_idx"].to(self.device, dtype=torch.long).view(-1)
+        boxes = xywh2xyxy(batch["bboxes"].to(self.device))
+        scale = boxes.new_tensor((w, h, w, h))
+        boxes = boxes * scale
+
+        for bi, box in zip(batch_idx.tolist(), boxes):
+            x1, y1, x2, y2 = box
+            x1 = int(torch.floor(x1).clamp(0, w - 1).item())
+            y1 = int(torch.floor(y1).clamp(0, h - 1).item())
+            x2 = int(torch.ceil(x2).clamp(0, w - 1).item())
+            y2 = int(torch.ceil(y2).clamp(0, h - 1).item())
+            if x2 < x1:
+                x2 = x1
+            if y2 < y1:
+                y2 = y1
+            target[bi, 0, y1 : y2 + 1, x1] = 1.0
+            target[bi, 0, y1 : y2 + 1, x2] = 1.0
+            target[bi, 0, y1, x1 : x2 + 1] = 1.0
+            target[bi, 0, y2, x1 : x2 + 1] = 1.0
+        return target
+
+    def boundary_loss(self, pred_boundary: torch.Tensor, batch: dict[str, torch.Tensor]) -> torch.Tensor:
+        """Calculate a foreground-balanced BCE loss for boundary logits."""
+        target = self.build_boundary_targets(pred_boundary, batch)
+        pos = target.sum()
+        if pos <= 0:
+            return pred_boundary.sum() * 0.0
+        neg = target.numel() - pos
+        pos_weight = (neg / pos.clamp_min(1.0)).clamp(max=20.0).detach()
+        return F.binary_cross_entropy_with_logits(pred_boundary, target, pos_weight=pos_weight)
+
     def __call__(
         self,
         preds: dict[str, torch.Tensor] | tuple[torch.Tensor, dict[str, torch.Tensor]],
@@ -477,6 +516,15 @@ class v8DetectionLoss:
         """Calculate detection loss using assigned targets."""
         batch_size = preds["boxes"].shape[0]
         loss, loss_detach = self.get_assigned_targets_and_loss(preds, batch)[1:]
+        if self.boundary_loss_gain > 0.0:
+            pred_boundary = preds.get("aux_boundary")
+            boundary_loss = (
+                self.boundary_loss(pred_boundary, batch) * self.boundary_loss_gain
+                if pred_boundary is not None
+                else preds["boxes"].sum() * 0.0
+            )
+            loss = torch.cat((loss, boundary_loss.view(1)))
+            loss_detach = loss.detach()
         return loss * batch_size, loss_detach
 
 

@@ -24,6 +24,7 @@ __all__ = (
     "OBB",
     "Classify",
     "Detect",
+    "DetectBAB",
     "Pose",
     "RTDETRDecoder",
     "Segment",
@@ -260,6 +261,30 @@ class Detect(nn.Module):
     def fuse(self) -> None:
         """Remove the one2many head for inference optimization."""
         self.cv2 = self.cv3 = None
+
+
+class DetectBAB(Detect):
+    """YOLO Detect head with a training-only boundary-aware auxiliary branch."""
+
+    def __init__(self, nc: int = 80, boundary_loss_gain: float = 0.1, reg_max=16, end2end=False, ch: tuple = ()):
+        """Initialize DetectBAB with normal detection inputs plus one boundary source feature."""
+        if len(ch) < 2:
+            raise ValueError("DetectBAB expects detection features plus one boundary source feature.")
+        det_ch, aux_ch = ch[:-1], ch[-1]
+        super().__init__(nc=nc, reg_max=reg_max, end2end=end2end, ch=det_ch)
+        hidden = max(16, min(aux_ch, 64))
+        self.boundary_loss_gain = boundary_loss_gain
+        self.bab = nn.Sequential(Conv(aux_ch, hidden, 3), Conv(hidden, hidden, 3), nn.Conv2d(hidden, 1, 1))
+
+    def forward(
+        self, x: list[torch.Tensor]
+    ) -> dict[str, torch.Tensor] | torch.Tensor | tuple[torch.Tensor, dict[str, torch.Tensor]]:
+        """Return normal detection predictions and add boundary logits only during training."""
+        det_x, aux_x = x[:-1], x[-1]
+        preds = super().forward(det_x)
+        if self.training:
+            preds["aux_boundary"] = self.bab(aux_x)
+        return preds
 
 
 class Segment(Detect):

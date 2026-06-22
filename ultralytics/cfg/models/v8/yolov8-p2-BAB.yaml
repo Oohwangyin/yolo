@@ -1,12 +1,12 @@
 # Ultralytics AGPL-3.0 License - https://ultralytics.com/license
 
-# YOLOv8 object detection model with P2/4 - P5/32 outputs and DSAM enhancement.
-# DSAM uses the final neck P4/16 feature to generate foreground/background attention
-# and enhances the final neck P2/4 feature before the Detect head.
+# YOLOv8 object detection model with P2/4 - P5/32 outputs and a training-only
+# boundary-aware auxiliary branch. The BAB branch uses the final neck P2/4 feature
+# for boundary supervision during training and is skipped during inference.
 
 # Parameters
 nc: 80 # number of classes
-scales: # model compound scaling constants, i.e. 'model=yolov8s-p2-DSAM.yaml' will call yolov8-p2-DSAM.yaml with scale 'n'
+scales: # model compound scaling constants, i.e. 'model=yolov8s-p2-BAB.yaml' will call yolov8-p2-BAB.yaml with scale 's'
   # [depth, width, max_channels]
   n: [0.33, 0.25, 1024]
   s: [0.33, 0.50, 1024]
@@ -28,7 +28,7 @@ backbone:
   - [-1, 3, C2f, [1024, True]]
   - [-1, 1, SPPF, [1024, 5]] # 9
 
-# YOLOv8.0-P2-DSAM head
+# YOLOv8.0-P2-BAB head
 head:
   - [-1, 1, nn.Upsample, [None, 2, "nearest"]]
   - [[-1, 6], 1, Concat, [1]] # cat backbone P4
@@ -54,5 +54,4 @@ head:
   - [[-1, 9], 1, Concat, [1]] # cat head P5
   - [-1, 3, C2f, [1024]] # 27 (P5/32-large)
 
-  - [[18, 24], 1, DSAM, []] # 28 (P4/16 -> P2/4)
-  - [[28, 21, 24, 27], 1, Detect, [nc]] # Detect(DSAM-P2, P3, P4, P5)
+  - [[18, 21, 24, 27, 18], 1, DetectBAB, [nc, 0.1]] # Detect(P2, P3, P4, P5) + train-only BAB(P2)
