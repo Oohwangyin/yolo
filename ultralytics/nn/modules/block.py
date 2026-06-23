@@ -12,6 +12,7 @@ import torch.nn.functional as F
 from ultralytics.utils.torch_utils import fuse_conv_and_bn
 
 from .conv import Conv, DWConv, GhostConv, LightConv, RepConv, autopad
+from .fdconv import FDConv
 from .transformer import TransformerBlock
 
 __all__ = (
@@ -34,6 +35,7 @@ __all__ = (
     "Bottleneck",
     "BottleneckCSP",
     "C2f",
+    "C2fFDConv",
     "C2fAttn",
     "C2fCIB",
     "C2fPSA",
@@ -587,6 +589,70 @@ class Bottleneck(nn.Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """Apply bottleneck with optional shortcut connection."""
         return x + self.cv2(self.cv1(x)) if self.add else self.cv2(self.cv1(x))
+
+
+class BottleneckFDConv(nn.Module):
+    """Bottleneck with FDConv on the main spatial transform."""
+
+    def __init__(
+        self,
+        c1: int,
+        c2: int,
+        shortcut: bool = True,
+        g: int = 1,
+        k: tuple[int, int] = (3, 3),
+        e: float = 0.5,
+        kernel_num: int = 4,
+        use_fbm: bool = True,
+    ):
+        """Initialize a bottleneck that keeps the first conv standard and uses FDConv for the second conv."""
+        super().__init__()
+        c_ = int(c2 * e)
+        self.cv1 = Conv(c1, c_, k[0], 1)
+        self.cv2 = FDConv(c_, c2, k[1], 1, g=g, kernel_num=kernel_num, use_fbm=use_fbm)
+        self.add = shortcut and c1 == c2
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Apply FDConv bottleneck with optional shortcut connection."""
+        return x + self.cv2(self.cv1(x)) if self.add else self.cv2(self.cv1(x))
+
+
+class C2fFDConv(nn.Module):
+    """C2f block with FDConv bottlenecks for backbone feature extraction."""
+
+    def __init__(
+        self,
+        c1: int,
+        c2: int,
+        n: int = 1,
+        shortcut: bool = False,
+        g: int = 1,
+        e: float = 0.5,
+        kernel_num: int = 4,
+        use_fbm: bool = True,
+    ):
+        """Initialize a C2f block whose internal bottleneck spatial conv uses FDConv."""
+        super().__init__()
+        self.c = int(c2 * e)
+        self.cv1 = Conv(c1, 2 * self.c, 1, 1)
+        self.cv2 = Conv((2 + n) * self.c, c2, 1)
+        self.m = nn.ModuleList(
+            BottleneckFDConv(self.c, self.c, shortcut, g, k=(3, 3), e=1.0, kernel_num=kernel_num, use_fbm=use_fbm)
+            for _ in range(n)
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Forward pass through C2fFDConv."""
+        y = list(self.cv1(x).chunk(2, 1))
+        y.extend(m(y[-1]) for m in self.m)
+        return self.cv2(torch.cat(y, 1))
+
+    def forward_split(self, x: torch.Tensor) -> torch.Tensor:
+        """Forward pass using split() instead of chunk()."""
+        y = self.cv1(x).split((self.c, self.c), 1)
+        y = [y[0], y[1]]
+        y.extend(m(y[-1]) for m in self.m)
+        return self.cv2(torch.cat(y, 1))
 
 
 class BottleneckCSP(nn.Module):
