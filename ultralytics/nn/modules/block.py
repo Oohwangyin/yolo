@@ -34,6 +34,7 @@ __all__ = (
     "BNContrastiveHead",
     "Bottleneck",
     "BottleneckCSP",
+    "CARAFE",
     "C2f",
     "C2fFDConv",
     "C2fAttn",
@@ -108,6 +109,61 @@ class Proto(nn.Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """Perform a forward pass through layers using an upsampled input image."""
         return self.cv3(self.cv2(self.upsample(self.cv1(x))))
+
+
+class CARAFE(nn.Module):
+    """Content-aware reassembly of features for learnable upsampling."""
+
+    def __init__(
+        self,
+        c1: int,
+        scale_factor: int = 2,
+        kernel_size: int = 5,
+        encoder_kernel: int = 3,
+        c_mid: int = 64,
+    ):
+        """Initialize CARAFE.
+
+        Args:
+            c1 (int): Input and output channels.
+            scale_factor (int): Upsampling factor.
+            kernel_size (int): Reassembly kernel size.
+            encoder_kernel (int): Kernel size used to predict reassembly weights.
+            c_mid (int): Compressed channels for the kernel prediction branch.
+        """
+        super().__init__()
+        if scale_factor < 1:
+            raise ValueError("CARAFE scale_factor must be >= 1.")
+        if kernel_size % 2 == 0 or encoder_kernel % 2 == 0:
+            raise ValueError("CARAFE kernel_size and encoder_kernel must be odd.")
+
+        self.scale_factor = int(scale_factor)
+        self.kernel_size = int(kernel_size)
+        c_mid = max(1, min(int(c_mid), c1))
+        self.compress = Conv(c1, c_mid, 1, 1)
+        self.encoder = nn.Conv2d(
+            c_mid,
+            (self.scale_factor * self.kernel_size) ** 2,
+            encoder_kernel,
+            stride=1,
+            padding=encoder_kernel // 2,
+        )
+        self.pixel_shuffle = nn.PixelShuffle(self.scale_factor)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Upsample features with content-aware reassembly kernels."""
+        b, c, h, w = x.shape
+        h_out, w_out = h * self.scale_factor, w * self.scale_factor
+
+        mask = self.encoder(self.compress(x))
+        mask = self.pixel_shuffle(mask).reshape(b, self.kernel_size * self.kernel_size, h_out, w_out)
+        mask = F.softmax(mask, dim=1)
+
+        x_unfold = F.unfold(x, kernel_size=self.kernel_size, padding=self.kernel_size // 2)
+        x_unfold = x_unfold.reshape(b, c * self.kernel_size * self.kernel_size, h, w)
+        x_unfold = F.interpolate(x_unfold, scale_factor=self.scale_factor, mode="nearest")
+        x_unfold = x_unfold.reshape(b, c, self.kernel_size * self.kernel_size, h_out, w_out)
+        return (x_unfold * mask.unsqueeze(1)).sum(dim=2)
 
 
 class HGStem(nn.Module):

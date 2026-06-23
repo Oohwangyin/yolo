@@ -31,6 +31,7 @@ from ultralytics.nn.modules import (
     ADown,
     Bottleneck,
     BottleneckCSP,
+    CARAFE,
     C2f,
     C2fFDConv,
     C2fAttn,
@@ -1797,6 +1798,9 @@ def parse_model(d, ch, verbose=True):
             args = [ch[f]]
         elif m is Concat:
             c2 = sum(ch[x] for x in f)
+        elif m is CARAFE:
+            c2 = ch[f]
+            args = [c2, *args]
         elif m is DSAM:
             if not isinstance(f, list) or len(f) != 2:
                 raise ValueError("DSAM expects two input layers: [low_level_feature, high_level_feature].")

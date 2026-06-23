@@ -1,6 +1,6 @@
 from ultralytics import YOLO
 
-model = YOLO("yolov8s-RFAConv-backbone.yaml")
+model = YOLO("ultralytics/cfg/models/v8/yolov8s-CARAFE.yaml")
 
 model.train(
     data="VisDrone.yaml",
@@ -12,7 +12,7 @@ model.train(
     pretrained=False,
     cos_lr=True,
     close_mosaic=20,
-    project="VisDrone/yolov8s-RFAConv-backbone",
+    project="VisDrone/yolov8s-CARAFE",
 )
 
 # model = YOLO("yolov8s.yaml")
@@ -26,5 +26,4 @@ model.train(
 #     optimizer="SGD",
 #     pretrained=False,
 # )
-
 

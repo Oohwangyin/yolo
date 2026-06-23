@@ -1,0 +1,21 @@
+{
+  "settings_version": "0.0.6",
+  "datasets_dir": "D:\\MyProject\\datasets",
+  "weights_dir": "D:\\MyProject\\yolo\\weights",
+  "runs_dir": "D:\\MyProject\\yolo\\runs",
+  "uuid": "fca2d5de6cba6a7bbb6aef762222e57258b2e6fb1fefec0f2aa0a5614bb5a885",
+  "sync": true,
+  "api_key": "",
+  "openai_api_key": "",
+  "clearml": true,
+  "comet": true,
+  "dvc": true,
+  "hub": true,
+  "mlflow": true,
+  "neptune": true,
+  "raytune": true,
+  "tensorboard": false,
+  "wandb": false,
+  "vscode_msg": true,
+  "openvino_msg": true
+}
