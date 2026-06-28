@@ -109,6 +109,8 @@ def bbox_iou(
     GIoU: bool = False,
     DIoU: bool = False,
     CIoU: bool = False,
+    MPDIoU: bool = False,
+    mpdiou_hw: torch.Tensor | None = None,
     eps: float = 1e-7,
 ) -> torch.Tensor:
     """Calculate the Intersection over Union (IoU) between bounding boxes.
@@ -125,10 +127,12 @@ def bbox_iou(
         GIoU (bool, optional): If True, calculate Generalized IoU.
         DIoU (bool, optional): If True, calculate Distance IoU.
         CIoU (bool, optional): If True, calculate Complete IoU.
+        MPDIoU (bool, optional): If True, calculate Minimum Point Distance IoU.
+        mpdiou_hw (torch.Tensor | None, optional): Image width and height in the same coordinate scale as boxes.
         eps (float, optional): A small value to avoid division by zero.
 
     Returns:
-        (torch.Tensor): IoU, GIoU, DIoU, or CIoU values depending on the specified flags.
+        (torch.Tensor): IoU, GIoU, DIoU, CIoU, or MPDIoU values depending on the specified flags.
     """
     # Get the coordinates of bounding boxes
     if xywh:  # transform from xywh to xyxy
@@ -152,6 +156,17 @@ def bbox_iou(
 
     # IoU
     iou = inter / union
+    if MPDIoU:
+        d1 = (b2_x1 - b1_x1).pow(2) + (b2_y1 - b1_y1).pow(2)
+        d2 = (b2_x2 - b1_x2).pow(2) + (b2_y2 - b1_y2).pow(2)
+        if mpdiou_hw is None:
+            mpdiou_w = b1_x2.maximum(b2_x2) - b1_x1.minimum(b2_x1)
+            mpdiou_h = b1_y2.maximum(b2_y2) - b1_y1.minimum(b2_y1)
+        else:
+            mpdiou_hw = mpdiou_hw.to(device=box1.device, dtype=box1.dtype)
+            mpdiou_w, mpdiou_h = mpdiou_hw[..., 0:1], mpdiou_hw[..., 1:2]
+        mpdiou_c2 = mpdiou_w.pow(2) + mpdiou_h.pow(2) + eps
+        return iou - d1 / mpdiou_c2 - d2 / mpdiou_c2
     if CIoU or DIoU or GIoU:
         cw = b1_x2.maximum(b2_x2) - b1_x1.minimum(b2_x1)  # convex (smallest enclosing box) width
         ch = b1_y2.maximum(b2_y2) - b1_y1.minimum(b2_y1)  # convex height

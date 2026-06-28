@@ -110,9 +110,12 @@ class DFLoss(nn.Module):
 class BboxLoss(nn.Module):
     """Criterion class for computing training losses for bounding boxes."""
 
-    def __init__(self, reg_max: int = 16):
+    def __init__(self, reg_max: int = 16, box_iou: str = "ciou"):
         """Initialize the BboxLoss module with regularization maximum and DFL settings."""
         super().__init__()
+        self.box_iou = str(box_iou).lower()
+        if self.box_iou not in {"iou", "giou", "diou", "ciou", "mpdiou"}:
+            raise ValueError(f"Unsupported box_iou='{box_iou}'. Valid values are iou, giou, diou, ciou, mpdiou.")
         self.dfl_loss = DFLoss(reg_max) if reg_max > 1 else None
 
     def forward(
@@ -129,7 +132,21 @@ class BboxLoss(nn.Module):
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Compute IoU and DFL losses for bounding boxes."""
         weight = target_scores.sum(-1)[fg_mask].unsqueeze(-1)
-        iou = bbox_iou(pred_bboxes[fg_mask], target_bboxes[fg_mask], xywh=False, CIoU=True)
+        pred_bboxes_fg, target_bboxes_fg = pred_bboxes[fg_mask], target_bboxes[fg_mask]
+        if self.box_iou == "mpdiou":
+            mpdiou_hw = imgsz[[1, 0]].to(device=pred_bboxes.device, dtype=pred_bboxes.dtype) / stride.to(
+                device=pred_bboxes.device, dtype=pred_bboxes.dtype
+            )
+            mpdiou_hw = mpdiou_hw.unsqueeze(0).expand(fg_mask.shape[0], -1, -1)[fg_mask]
+            iou = bbox_iou(pred_bboxes_fg, target_bboxes_fg, xywh=False, MPDIoU=True, mpdiou_hw=mpdiou_hw)
+        elif self.box_iou == "iou":
+            iou = bbox_iou(pred_bboxes_fg, target_bboxes_fg, xywh=False)
+        elif self.box_iou == "giou":
+            iou = bbox_iou(pred_bboxes_fg, target_bboxes_fg, xywh=False, GIoU=True)
+        elif self.box_iou == "diou":
+            iou = bbox_iou(pred_bboxes_fg, target_bboxes_fg, xywh=False, DIoU=True)
+        else:
+            iou = bbox_iou(pred_bboxes_fg, target_bboxes_fg, xywh=False, CIoU=True)
         loss_iou = ((1.0 - iou) * weight).sum() / target_scores_sum
 
         # DFL loss
@@ -366,7 +383,7 @@ class v8DetectionLoss:
             stride=self.stride.tolist(),
             topk2=tal_topk2,
         )
-        self.bbox_loss = BboxLoss(m.reg_max).to(device)
+        self.bbox_loss = BboxLoss(m.reg_max, getattr(h, "box_iou", "ciou")).to(device)
         self.proj = torch.arange(m.reg_max, dtype=torch.float, device=device)
 
     def preprocess(self, targets: torch.Tensor, batch_size: int, scale_tensor: torch.Tensor) -> torch.Tensor:
