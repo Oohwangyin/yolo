@@ -83,6 +83,7 @@ from .conv import (
     SpatialAttention,
 )
 from .fdconv import FDConv
+from .fafm import FAFM
 from .fem import FEM
 from .rfaconv import RFAConv
 from .head import (
@@ -168,6 +169,7 @@ __all__ = (
     "Detect",
     "DetectBAB",
     "DSAM",
+    "FAFM",
     "FDConv",
     "FEM",
     "Focus",

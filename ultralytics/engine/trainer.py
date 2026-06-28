@@ -54,6 +54,9 @@ from ultralytics.utils.torch_utils import (
     attempt_compile,
     autocast,
     convert_optimizer_state_dict_to_fp16,
+    get_flops,
+    get_num_gradients,
+    get_num_params,
     init_seeds,
     one_cycle,
     select_device,
@@ -344,6 +347,8 @@ class BaseTrainer:
         gs = max(int(self.model.stride.max() if hasattr(self.model, "stride") else 32), 32)  # grid size (max stride)
         self.args.imgsz = check_imgsz(self.args.imgsz, stride=gs, floor=gs, max_dim=1)
         self.stride = gs  # for multiscale training
+        if RANK in {-1, 0}:
+            self._append_model_summary_to_args()
 
         if self.world_size > 1:
             # static_graph=True permits params used >1 time per forward (e.g. flow_model in
@@ -612,6 +617,21 @@ class BaseTrainer:
             if fraction:
                 total = torch.cuda.get_device_properties(self.device).total_memory
         return ((memory / total) if total > 0 else 0) if fraction else (memory / 2**30)
+
+    def _append_model_summary_to_args(self):
+        """Append model layer, parameter, gradient, and GFLOPs summary to args.yaml."""
+        model = unwrap_model(self.model)
+        yaml_file = getattr(model, "yaml_file", "") or getattr(model, "yaml", {}).get("yaml_file", "")
+        model_name = Path(yaml_file).stem.replace("yolo", "YOLO") or "Model"
+        layers = __import__("collections").OrderedDict((n, m) for n, m in model.named_modules() if len(m._modules) == 0)
+        n_l = len(layers)
+        n_p = get_num_params(model)
+        n_g = get_num_gradients(model)
+        flops = get_flops(model, self.args.imgsz)
+        flops_str = f", {flops:.1f} GFLOPs" if flops else ""
+        summary = f"{model_name} summary: {n_l:,} layers, {n_p:,} parameters, {n_g:,} gradients{flops_str}"
+        with open(self.save_dir / "args.yaml", "a", encoding="utf-8") as f:
+            f.write(f"{summary}\n")
 
     def _clear_memory(self, threshold: float | None = None):
         """Clear accelerator memory by calling garbage collector and emptying cache."""

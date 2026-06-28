@@ -52,6 +52,7 @@ from ultralytics.nn.modules import (
     DWConv,
     DWConvTranspose2d,
     DSAM,
+    FAFM,
     FDConv,
     FEM,
     Focus,
@@ -1806,6 +1807,12 @@ def parse_model(d, ch, verbose=True):
                 raise ValueError("DSAM expects two input layers: [low_level_feature, high_level_feature].")
             c2 = ch[f[0]]
             args = [c2, ch[f[1]], *args]
+        elif m is FAFM:
+            if not isinstance(f, list) or len(f) != 2:
+                raise ValueError("FAFM expects two input layers: [low_level_feature, high_level_feature].")
+            c2 = args[0] if args else ch[f[0]]
+            c2 = make_divisible(min(c2, max_channels) * width, 8)
+            args = [ch[f[0]], ch[f[1]], c2, *args[1:]]
         elif m in frozenset(
             {
                 Detect,
