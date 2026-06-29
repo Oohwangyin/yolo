@@ -350,6 +350,7 @@ class v8DetectionLoss:
         self.reg_max = m.reg_max
         self.device = device
         self.boundary_loss_gain = float(getattr(m, "boundary_loss_gain", 0.0))
+        self.sacbl_loss_gain = float(getattr(m, "sacbl_loss_gain", 0.0))
 
         self.use_dfl = m.reg_max > 1
 
@@ -504,6 +505,58 @@ class v8DetectionLoss:
         pos_weight = (neg / pos.clamp_min(1.0)).clamp(max=20.0).detach()
         return F.binary_cross_entropy_with_logits(pred_boundary, target, pos_weight=pos_weight)
 
+    def build_semantic_boundary_targets(self, pred_sem_boundary: torch.Tensor, batch: dict[str, torch.Tensor]):
+        """Create local background/interior/boundary targets from normalized xywh boxes."""
+        b, _, h, w = pred_sem_boundary.shape
+        target = torch.full((b, h, w), -100, device=self.device, dtype=torch.long)
+        if batch["bboxes"].numel() == 0:
+            return target
+
+        batch_idx = batch["batch_idx"].to(self.device, dtype=torch.long).view(-1)
+        boxes = xywh2xyxy(batch["bboxes"].to(self.device))
+        boxes = boxes * boxes.new_tensor((w, h, w, h))
+
+        for bi, box in zip(batch_idx.tolist(), boxes):
+            x1, y1, x2, y2 = box
+            x1 = int(torch.floor(x1).clamp(0, w - 1).item())
+            y1 = int(torch.floor(y1).clamp(0, h - 1).item())
+            x2 = int(torch.ceil(x2).clamp(0, w - 1).item())
+            y2 = int(torch.ceil(y2).clamp(0, h - 1).item())
+            if x2 < x1:
+                x2 = x1
+            if y2 < y1:
+                y2 = y1
+
+            bw = 1
+            margin = 1
+            ox1, oy1 = max(x1 - margin, 0), max(y1 - margin, 0)
+            ox2, oy2 = min(x2 + margin, w - 1), min(y2 + margin, h - 1)
+
+            local = target[bi, oy1 : oy2 + 1, ox1 : ox2 + 1]
+            local = torch.where(local < 0, torch.zeros_like(local), local)
+            target[bi, oy1 : oy2 + 1, ox1 : ox2 + 1] = local
+
+            target[bi, y1 : y2 + 1, x1 : x2 + 1] = 1
+            target[bi, y1 : y2 + 1, x1 : min(x1 + bw, w)] = 2
+            target[bi, y1 : y2 + 1, max(x2 - bw + 1, 0) : x2 + 1] = 2
+            target[bi, y1 : min(y1 + bw, h), x1 : x2 + 1] = 2
+            target[bi, max(y2 - bw + 1, 0) : y2 + 1, x1 : x2 + 1] = 2
+
+        return target
+
+    def semantic_boundary_loss(self, pred_sem_boundary: torch.Tensor, batch: dict[str, torch.Tensor]) -> torch.Tensor:
+        """Calculate the detection-style semantic-aware box boundary auxiliary loss."""
+        target = self.build_semantic_boundary_targets(pred_sem_boundary, batch)
+        valid = target.ge(0)
+        if not valid.any():
+            return pred_sem_boundary.sum() * 0.0
+
+        counts = torch.bincount(target[valid], minlength=3).to(pred_sem_boundary.dtype)
+        total = counts.sum().clamp_min(1.0)
+        weights = (total / counts.clamp_min(1.0) / 3.0).clamp(max=10.0)
+        loss = F.cross_entropy(pred_sem_boundary, target, weight=weights, ignore_index=-100, reduction="none")
+        return loss[valid].mean()
+
     def __call__(
         self,
         preds: dict[str, torch.Tensor] | tuple[torch.Tensor, dict[str, torch.Tensor]],
@@ -524,6 +577,15 @@ class v8DetectionLoss:
                 else preds["boxes"].sum() * 0.0
             )
             loss = torch.cat((loss, boundary_loss.view(1)))
+            loss_detach = loss.detach()
+        if self.sacbl_loss_gain > 0.0:
+            pred_sem_boundary = preds.get("aux_sem_boundary")
+            sacbl_loss = (
+                self.semantic_boundary_loss(pred_sem_boundary, batch) * self.sacbl_loss_gain
+                if pred_sem_boundary is not None
+                else preds["boxes"].sum() * 0.0
+            )
+            loss = torch.cat((loss, sacbl_loss.view(1)))
             loss_detach = loss.detach()
         return loss * batch_size, loss_detach
 

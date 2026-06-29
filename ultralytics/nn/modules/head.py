@@ -25,6 +25,7 @@ __all__ = (
     "Classify",
     "Detect",
     "DetectBAB",
+    "DetectSAB",
     "Pose",
     "RTDETRDecoder",
     "Segment",
@@ -284,6 +285,30 @@ class DetectBAB(Detect):
         preds = super().forward(det_x)
         if self.training:
             preds["aux_boundary"] = self.bab(aux_x)
+        return preds
+
+
+class DetectSAB(Detect):
+    """YOLO Detect head with a training-only semantic box-boundary auxiliary branch."""
+
+    def __init__(self, nc: int = 80, sacbl_loss_gain: float = 0.1, reg_max=16, end2end=False, ch: tuple = ()):
+        """Initialize DetectSAB with normal detection inputs plus one semantic-boundary source feature."""
+        if len(ch) < 2:
+            raise ValueError("DetectSAB expects detection features plus one semantic-boundary source feature.")
+        det_ch, aux_ch = ch[:-1], ch[-1]
+        super().__init__(nc=nc, reg_max=reg_max, end2end=end2end, ch=det_ch)
+        hidden = max(16, min(aux_ch, 64))
+        self.sacbl_loss_gain = sacbl_loss_gain
+        self.sab = nn.Sequential(Conv(aux_ch, hidden, 3), Conv(hidden, hidden, 3), nn.Conv2d(hidden, 3, 1))
+
+    def forward(
+        self, x: list[torch.Tensor]
+    ) -> dict[str, torch.Tensor] | torch.Tensor | tuple[torch.Tensor, dict[str, torch.Tensor]]:
+        """Return normal detection predictions and add semantic-boundary logits only during training."""
+        det_x, aux_x = x[:-1], x[-1]
+        preds = super().forward(det_x)
+        if self.training:
+            preds["aux_sem_boundary"] = self.sab(aux_x)
         return preds
 
 
