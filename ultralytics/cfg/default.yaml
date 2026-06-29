@@ -100,7 +100,6 @@ warmup_epochs: 3.0 # (float) warmup epochs (fractions allowed)
 warmup_momentum: 0.8 # (float) initial momentum during warmup
 warmup_bias_lr: 0.1 # (float) bias learning rate during warmup
 box: 7.5 # (float) box loss gain
-box_iou: ciou # (str) box IoU loss type, one of iou, giou, diou, ciou, mpdiou
 cls: 0.5 # (float) classification loss gain
 cls_pw: 0.0 # (float) class weights power for handling class imbalance (0.0=disable, 1.0=full inverse frequency)
 dfl: 1.5 # (float) distribution focal loss gain

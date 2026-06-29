@@ -110,12 +110,9 @@ class DFLoss(nn.Module):
 class BboxLoss(nn.Module):
     """Criterion class for computing training losses for bounding boxes."""
 
-    def __init__(self, reg_max: int = 16, box_iou: str = "ciou"):
+    def __init__(self, reg_max: int = 16):
         """Initialize the BboxLoss module with regularization maximum and DFL settings."""
         super().__init__()
-        self.box_iou = str(box_iou).lower()
-        if self.box_iou not in {"iou", "giou", "diou", "ciou", "mpdiou"}:
-            raise ValueError(f"Unsupported box_iou='{box_iou}'. Valid values are iou, giou, diou, ciou, mpdiou.")
         self.dfl_loss = DFLoss(reg_max) if reg_max > 1 else None
 
     def forward(
@@ -132,21 +129,7 @@ class BboxLoss(nn.Module):
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Compute IoU and DFL losses for bounding boxes."""
         weight = target_scores.sum(-1)[fg_mask].unsqueeze(-1)
-        pred_bboxes_fg, target_bboxes_fg = pred_bboxes[fg_mask], target_bboxes[fg_mask]
-        if self.box_iou == "mpdiou":
-            mpdiou_hw = imgsz[[1, 0]].to(device=pred_bboxes.device, dtype=pred_bboxes.dtype) / stride.to(
-                device=pred_bboxes.device, dtype=pred_bboxes.dtype
-            )
-            mpdiou_hw = mpdiou_hw.unsqueeze(0).expand(fg_mask.shape[0], -1, -1)[fg_mask]
-            iou = bbox_iou(pred_bboxes_fg, target_bboxes_fg, xywh=False, MPDIoU=True, mpdiou_hw=mpdiou_hw)
-        elif self.box_iou == "iou":
-            iou = bbox_iou(pred_bboxes_fg, target_bboxes_fg, xywh=False)
-        elif self.box_iou == "giou":
-            iou = bbox_iou(pred_bboxes_fg, target_bboxes_fg, xywh=False, GIoU=True)
-        elif self.box_iou == "diou":
-            iou = bbox_iou(pred_bboxes_fg, target_bboxes_fg, xywh=False, DIoU=True)
-        else:
-            iou = bbox_iou(pred_bboxes_fg, target_bboxes_fg, xywh=False, CIoU=True)
+        iou = bbox_iou(pred_bboxes[fg_mask], target_bboxes[fg_mask], xywh=False, CIoU=True)
         loss_iou = ((1.0 - iou) * weight).sum() / target_scores_sum
 
         # DFL loss
@@ -367,13 +350,6 @@ class v8DetectionLoss:
         self.reg_max = m.reg_max
         self.device = device
         self.boundary_loss_gain = float(getattr(m, "boundary_loss_gain", 0.0))
-        self.pgm_modules = [module for module in model.modules() if module.__class__.__name__ == "PGHeadEnhance"]
-        self.pgm_loss_weight = float(getattr(h, "pgm_loss_weight", 1.0))
-        self.pgm_loss_layer_weight = float(getattr(h, "pgm_loss_layer_weight", 10.0))
-        self.pgm_loss_gamma = float(getattr(h, "pgm_loss_gamma", 1.2))
-        self.pgm_loss_alpha = float(getattr(h, "pgm_loss_alpha", 0.25))
-        self.pgm_center_coeff = float(getattr(h, "pgm_center_coeff", 1.0))
-        self.pgm_obj_scale_factor = float(getattr(h, "pgm_obj_scale_factor", 4.0))
 
         self.use_dfl = m.reg_max > 1
 
@@ -390,7 +366,7 @@ class v8DetectionLoss:
             stride=self.stride.tolist(),
             topk2=tal_topk2,
         )
-        self.bbox_loss = BboxLoss(m.reg_max, getattr(h, "box_iou", "ciou")).to(device)
+        self.bbox_loss = BboxLoss(m.reg_max).to(device)
         self.proj = torch.arange(m.reg_max, dtype=torch.float, device=device)
 
     def preprocess(self, targets: torch.Tensor, batch_size: int, scale_tensor: torch.Tensor) -> torch.Tensor:
@@ -490,86 +466,6 @@ class v8DetectionLoss:
         """Parse model predictions to extract features."""
         return preds[1] if isinstance(preds, tuple) else preds
 
-    def pgm_sigmoid_focal_loss(self, logits: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
-        """Compute sigmoid focal loss for PGM position-map logits."""
-        bce = F.binary_cross_entropy_with_logits(logits, target, reduction="none")
-        prob = logits.sigmoid()
-        pt = target * prob + (1.0 - target) * (1.0 - prob)
-        loss = bce * ((1.0 - pt) ** self.pgm_loss_gamma)
-        if self.pgm_loss_alpha >= 0:
-            alpha = target * self.pgm_loss_alpha + (1.0 - target) * (1.0 - self.pgm_loss_alpha)
-            loss = loss * alpha
-        return loss.mean()
-
-    def build_pgm_guidance_target(
-        self, logits: torch.Tensor, batch: dict[str, torch.Tensor], img_hw: tuple[int, int]
-    ) -> torch.Tensor:
-        """Build small-object position targets for one PGM feature map."""
-        batch_size, _, feat_h, feat_w = logits.shape
-        target = logits.new_zeros((batch_size, 1, feat_h, feat_w))
-        if batch["bboxes"].numel() == 0:
-            return target
-
-        img_h, img_w = img_hw
-        stride_y = float(img_h) / feat_h
-        stride_x = float(img_w) / feat_w
-        stride = (stride_x + stride_y) / 2.0
-        max_scale = stride * self.pgm_obj_scale_factor
-
-        bboxes = batch["bboxes"].to(device=logits.device, dtype=logits.dtype)
-        batch_idx = batch["batch_idx"].to(device=logits.device).long().view(-1)
-        centers = bboxes[:, :2] * logits.new_tensor([img_w, img_h])
-        sizes = bboxes[:, 2:4] * logits.new_tensor([img_w, img_h])
-        scales = torch.sqrt((sizes[:, 0] * sizes[:, 1]).clamp(min=0))
-        valid = (scales > 0) & (scales < max_scale)
-        if not valid.any():
-            return target
-
-        batch_idx = batch_idx[valid]
-        centers = centers[valid]
-        scales = scales[valid]
-        yy, xx = torch.meshgrid(
-            torch.arange(feat_h, device=logits.device, dtype=logits.dtype) * stride_y + stride_y / 2.0,
-            torch.arange(feat_w, device=logits.device, dtype=logits.dtype) * stride_x + stride_x / 2.0,
-            indexing="ij",
-        )
-        for img_i in range(batch_size):
-            obj_mask = batch_idx == img_i
-            if not obj_mask.any():
-                continue
-            obj_centers = centers[obj_mask]
-            obj_scales = scales[obj_mask] * self.pgm_center_coeff
-            dist = torch.sqrt(
-                (xx.unsqueeze(0) - obj_centers[:, 0].view(-1, 1, 1)).pow(2)
-                + (yy.unsqueeze(0) - obj_centers[:, 1].view(-1, 1, 1)).pow(2)
-            )
-            target[img_i, 0] = (dist < obj_scales.view(-1, 1, 1)).any(0).to(target.dtype)
-        return target
-
-    def pgm_guidance_loss(self, preds: dict[str, torch.Tensor], batch: dict[str, torch.Tensor]) -> torch.Tensor:
-        """Calculate auxiliary PGM position-map loss for all PGHeadEnhance modules."""
-        if not self.pgm_modules or self.pgm_loss_weight <= 0:
-            return torch.zeros((), device=self.device)
-
-        if "img" in batch:
-            img_hw = tuple(int(x) for x in batch["img"].shape[2:])
-        else:
-            feat_hw = preds["feats"][0].shape[2:]
-            img_hw = (int(feat_hw[0] * self.stride[0]), int(feat_hw[1] * self.stride[0]))
-
-        losses = []
-        for module in self.pgm_modules:
-            logits = getattr(module, "guidance_logits", None)
-            if logits is None:
-                continue
-            target = self.build_pgm_guidance_target(logits, batch, img_hw)
-            losses.append(self.pgm_sigmoid_focal_loss(logits, target) * self.pgm_loss_layer_weight)
-            module.guidance_logits = None
-
-        if not losses:
-            return torch.zeros((), device=self.device)
-        return sum(losses) * self.pgm_loss_weight
-
     def build_boundary_targets(self, pred_boundary: torch.Tensor, batch: dict[str, torch.Tensor]) -> torch.Tensor:
         """Create rectangular boundary targets from normalized xywh boxes."""
         target = torch.zeros_like(pred_boundary)
@@ -620,10 +516,6 @@ class v8DetectionLoss:
         """Calculate detection loss using assigned targets."""
         batch_size = preds["boxes"].shape[0]
         loss, loss_detach = self.get_assigned_targets_and_loss(preds, batch)[1:]
-        if self.pgm_modules:
-            guidance_loss = self.pgm_guidance_loss(preds, batch)
-            loss = torch.cat((loss, guidance_loss.view(1)))
-            loss_detach = loss.detach()
         if self.boundary_loss_gain > 0.0:
             pred_boundary = preds.get("aux_boundary")
             boundary_loss = (

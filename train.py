@@ -9,7 +9,6 @@ model.train(
     imgsz=640,
     patience=30,
     optimizer="SGD",
-    box_iou="mpdiou",
     pretrained=False,
     cos_lr=True,
     close_mosaic=20,
