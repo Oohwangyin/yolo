@@ -1,0 +1,63 @@
+# Ultralytics AGPL-3.0 License - https://ultralytics.com/license
+
+# YOLOv8 object detection model with FAFM-Lite and lightweight PRN-inspired
+# shallow detail compensation. FAFM remains the main cross-scale fusion module;
+# the extra P2/P3 compensation only re-injects backbone shallow features before
+# the Detect head, without reproducing the full multi-round PRN topology.
+
+# Parameters
+nc: 80 # number of classes
+scales: # model compound scaling constants, i.e. 'model=yolov8s-FAFM-LitePRN.yaml' will call yolov8-FAFM-LitePRN.yaml with scale 's'
+  # [depth, width, max_channels]
+  n: [0.33, 0.25, 1024]
+  s: [0.33, 0.50, 1024]
+  m: [0.67, 0.75, 768]
+  l: [1.00, 1.00, 512]
+  x: [1.00, 1.25, 512]
+
+# YOLOv8.0 backbone
+backbone:
+  # [from, repeats, module, args]
+  - [-1, 1, Conv, [64, 3, 2]] # 0-P1/2
+  - [-1, 1, Conv, [128, 3, 2]] # 1-P2/4
+  - [-1, 3, C2f, [128, True]] # 2-P2/4
+  - [-1, 1, Conv, [256, 3, 2]] # 3-P3/8
+  - [-1, 6, C2f, [256, True]] # 4-P3/8
+  - [-1, 1, Conv, [512, 3, 2]] # 5-P4/16
+  - [-1, 6, C2f, [512, True]] # 6-P4/16
+  - [-1, 1, Conv, [1024, 3, 2]] # 7-P5/32
+  - [-1, 3, C2f, [1024, True]] # 8-P5/32
+  - [-1, 1, SPPF, [1024, 5]] # 9-P5/32
+
+# YOLOv8.0-FAFM-LitePRN head
+head:
+  # P5 -> P4 keeps standard lightweight top-down fusion.
+  - [-1, 1, nn.Upsample, [None, 2, "nearest"]]
+  - [[-1, 6], 1, Concat, [1]] # cat backbone P4
+  - [-1, 3, C2f, [512]] # 12-P4/16
+
+  # FAFM remains responsible for the small-object-relevant aligned fusion.
+  - [[4, 12], 1, FAFM, [256]] # 13 fuse P4 -> P3
+  - [-1, 3, C2f, [256]] # 14-P3/8
+
+  - [[2, 14], 1, FAFM, [128]] # 15 fuse P3 -> P2
+  - [-1, 3, C2f, [128]] # 16-P2/4
+
+  # Lightweight shallow compensation: re-inject raw P2 details before Detect(P2).
+  - [[16, 2], 1, Concat, [1]] # cat FAFM P2 and backbone P2
+  - [-1, 1, C2f, [128]] # 18-P2/4 detail-compensated
+
+  # Bottom-up path uses the compensated P2, then re-injects raw P3 details.
+  - [-1, 1, Conv, [128, 3, 2]]
+  - [[-1, 14], 1, Concat, [1]] # cat top-down P3
+  - [-1, 3, C2f, [256]] # 21-P3/8
+
+  - [[21, 4], 1, Concat, [1]] # cat refined P3 and backbone P3
+  - [-1, 1, C2f, [256]] # 23-P3/8 detail-compensated
+
+  # Refine P4 only once. No P5 detection head, matching FAFM-Lite.
+  - [-1, 1, Conv, [256, 3, 2]]
+  - [[-1, 12], 1, Concat, [1]] # cat top-down P4
+  - [-1, 3, C2f, [512]] # 26-P4/16
+
+  - [[18, 23, 26], 1, Detect, [nc]] # Detect(P2, P3, P4)
