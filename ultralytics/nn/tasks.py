@@ -77,6 +77,7 @@ from ultralytics.nn.modules import (
     SCDown,
     SHAB,
     SHDCBlock,
+    SHDCLite,
     Segment,
     Segment26,
     SemanticSegment,
@@ -1727,6 +1728,7 @@ def parse_model(d, ch, verbose=True):
             SCDown,
             SHAB,
             SHDCBlock,
+            SHDCLite,
             C2fCIB,
             A2C2f,
         }

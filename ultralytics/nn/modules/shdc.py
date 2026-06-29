@@ -11,7 +11,7 @@ import torch.nn.functional as F
 
 from .conv import Conv
 
-__all__ = ("SHDCBlock",)
+__all__ = ("SHDCBlock", "SHDCLite")
 
 
 class DyT(nn.Module):
@@ -150,4 +150,44 @@ class SHDCBlock(nn.Module):
         y = self.cv1(x)
         x_attn, x_local = y.split((self.c_attn, self.c_local), dim=1)
         y = self.proj(torch.cat((self._attention(x_attn), self.local(x_local)), dim=1))
+        return x + y if self.shortcut else y
+
+
+class SHDCLite(nn.Module):
+    """Local-only SHDC variant for high-resolution YOLO small-object features.
+
+    This keeps the part of DyGLNet's SHDCBlock that is most relevant to P2/P3
+    detection features: multi-scale dilated depthwise convolutions. It removes
+    the single-head attention branch to avoid duplicating FAFM's global/local
+    attention and to keep cost low on dense VisDrone feature maps.
+    """
+
+    def __init__(
+        self,
+        c1: int,
+        c2: int,
+        dilations=(1, 2, 3),
+        shortcut: bool = True,
+        ffn_ratio: float = 0.5,
+        use_se: bool = False,
+    ):
+        """Initialize a lightweight local multi-scale feature enhancer."""
+        super().__init__()
+        self.cv1 = Conv(c1, c2, 1, 1) if c1 != c2 else nn.Identity()
+        self.shortcut = shortcut and c1 == c2
+        self.branches = nn.ModuleList(Conv(c2, c2, 3, 1, g=c2, d=d, act=False) for d in tuple(dilations))
+        self.bn = nn.BatchNorm2d(c2)
+        self.act = nn.SiLU(inplace=True)
+        self.se = SEBlock(c2) if use_se else nn.Identity()
+
+        c_mid = max(8, int(c2 * ffn_ratio))
+        self.ffn = nn.Sequential(Conv(c2, c_mid, 1, 1), Conv(c_mid, c2, 1, 1, act=False)) if ffn_ratio > 0 else nn.Identity()
+        self.out = Conv(c2, c2, 1, 1)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Enhance a P2/P3 feature map with local multi-scale context."""
+        y = self.cv1(x)
+        local = self.act(self.bn(y + sum(branch(y) for branch in self.branches)))
+        local = self.se(local)
+        y = self.out(local + self.ffn(local))
         return x + y if self.shortcut else y

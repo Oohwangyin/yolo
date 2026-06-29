@@ -86,7 +86,7 @@ from .fdconv import FDConv
 from .fafm import FAFM
 from .fem import FEM
 from .rfaconv import RFAConv
-from .shdc import SHDCBlock
+from .shdc import SHDCBlock, SHDCLite
 from .head import (
     OBB,
     OBB26,
@@ -202,6 +202,7 @@ __all__ = (
     "SCDown",
     "SHAB",
     "SHDCBlock",
+    "SHDCLite",
     "Segment",
     "Segment26",
     "SemanticSegment",
