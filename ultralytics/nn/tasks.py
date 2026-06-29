@@ -76,6 +76,7 @@ from ultralytics.nn.modules import (
     RTDETRDecoder,
     SCDown,
     SHAB,
+    SHDCBlock,
     Segment,
     Segment26,
     SemanticSegment,
@@ -1725,6 +1726,7 @@ def parse_model(d, ch, verbose=True):
             PSA,
             SCDown,
             SHAB,
+            SHDCBlock,
             C2fCIB,
             A2C2f,
         }
