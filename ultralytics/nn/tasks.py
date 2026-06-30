@@ -49,6 +49,7 @@ from ultralytics.nn.modules import (
     ConvTranspose,
     Detect,
     DetectBAB,
+    DetectSQ,
     DetectSAB,
     DWConv,
     DWConvTranspose2d,
@@ -1822,6 +1823,7 @@ def parse_model(d, ch, verbose=True):
             {
                 Detect,
                 DetectBAB,
+                DetectSQ,
                 DetectSAB,
                 WorldDetect,
                 YOLOEDetect,
@@ -1841,6 +1843,7 @@ def parse_model(d, ch, verbose=True):
             if m in {
                 Detect,
                 DetectBAB,
+                DetectSQ,
                 DetectSAB,
                 YOLOEDetect,
                 Segment,

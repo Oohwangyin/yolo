@@ -351,6 +351,10 @@ class v8DetectionLoss:
         self.device = device
         self.boundary_loss_gain = float(getattr(m, "boundary_loss_gain", 0.0))
         self.sacbl_loss_gain = float(getattr(m, "sacbl_loss_gain", 0.0))
+        self.quality_loss_gain = float(getattr(m, "quality_loss_gain", 0.0))
+        self.quality_small_thr = float(getattr(m, "quality_small_thr", 32.0))
+        self.quality_small_gain = float(getattr(m, "quality_small_gain", 1.5))
+        self.quality_levels = int(getattr(m, "quality_levels", 0))
 
         self.use_dfl = m.reg_max > 1
 
@@ -455,6 +459,16 @@ class v8DetectionLoss:
         loss[0] *= self.hyp.box  # box gain
         loss[1] *= self.hyp.cls  # cls gain
         loss[2] *= self.hyp.dfl  # dfl gain
+        if self.quality_loss_gain > 0.0:
+            quality_loss = self.quality_loss(
+                preds.get("quality"),
+                preds["feats"],
+                pred_bboxes.detach() * stride_tensor,
+                target_bboxes,
+                target_scores,
+                fg_mask,
+            )
+            loss = torch.cat((loss, (quality_loss * self.quality_loss_gain).view(1)))
         return (
             (fg_mask, target_gt_idx, target_bboxes, anchor_points, stride_tensor),
             loss,
@@ -556,6 +570,48 @@ class v8DetectionLoss:
         weights = (total / counts.clamp_min(1.0) / 3.0).clamp(max=10.0)
         loss = F.cross_entropy(pred_sem_boundary, target, weight=weights, ignore_index=-100, reduction="none")
         return loss[valid].mean()
+
+    def quality_level_mask(self, feats: list[torch.Tensor], device: torch.device) -> torch.Tensor:
+        """Create a flattened detection-level mask for quality supervision."""
+        masks = []
+        for i, feat in enumerate(feats):
+            enabled = self.quality_levels <= 0 or i < self.quality_levels
+            masks.append(torch.full((feat.shape[2] * feat.shape[3],), enabled, dtype=torch.bool, device=device))
+        return torch.cat(masks, 0)
+
+    def quality_loss(
+        self,
+        pred_quality: torch.Tensor | None,
+        feats: list[torch.Tensor],
+        pred_bboxes: torch.Tensor,
+        target_bboxes: torch.Tensor,
+        target_scores: torch.Tensor,
+        fg_mask: torch.Tensor,
+    ) -> torch.Tensor:
+        """Supervise localization quality on positive small-object candidates."""
+        if pred_quality is None or not fg_mask.any():
+            return pred_bboxes.sum() * 0.0
+
+        pred_quality = pred_quality.permute(0, 2, 1).contiguous()
+        level_mask = self.quality_level_mask(feats, pred_quality.device).unsqueeze(0)
+        quality_mask = fg_mask & level_mask
+        if not quality_mask.any():
+            return pred_quality.sum() * 0.0
+
+        quality_target = bbox_iou(
+            pred_bboxes[quality_mask], target_bboxes[quality_mask], xywh=False
+        ).clamp_(0.0, 1.0).detach()
+        quality_logits = pred_quality[quality_mask]
+        score_weight = target_scores.sum(-1, keepdim=True)[quality_mask].detach()
+
+        boxes = target_bboxes[quality_mask]
+        wh = (boxes[..., 2:4] - boxes[..., 0:2]).clamp_min(0.0)
+        obj_size = torch.sqrt((wh[..., 0] * wh[..., 1]).clamp_min(1.0))
+        small_weight = 1.0 + self.quality_small_gain * (1.0 - obj_size / self.quality_small_thr).clamp(0.0, 1.0)
+        quality_weight = score_weight * small_weight.unsqueeze(-1)
+
+        loss = F.binary_cross_entropy_with_logits(quality_logits, quality_target, reduction="none")
+        return (loss * quality_weight).sum() / quality_weight.sum().clamp_min(1.0)
 
     def __call__(
         self,

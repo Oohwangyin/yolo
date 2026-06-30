@@ -25,6 +25,7 @@ __all__ = (
     "Classify",
     "Detect",
     "DetectBAB",
+    "DetectSQ",
     "DetectSAB",
     "Pose",
     "RTDETRDecoder",
@@ -310,6 +311,105 @@ class DetectSAB(Detect):
         if self.training:
             preds["aux_sem_boundary"] = self.sab(aux_x)
         return preds
+
+
+class DetectSQ(Detect):
+    """YOLO Detect head with a small-object localization quality branch."""
+
+    def __init__(
+        self,
+        nc: int = 80,
+        quality_loss_gain: float = 0.25,
+        quality_small_thr: float = 32.0,
+        quality_small_gain: float = 1.5,
+        quality_levels: int = 2,
+        reg_max=16,
+        end2end=False,
+        ch: tuple = (),
+    ):
+        """Initialize DetectSQ with an auxiliary localization quality predictor.
+
+        Args:
+            nc (int): Number of classes.
+            quality_loss_gain (float): Training loss gain for quality prediction.
+            quality_small_thr (float): Object-size threshold in input pixels for stronger quality supervision.
+            quality_small_gain (float): Extra quality-loss weight for objects below ``quality_small_thr``.
+            quality_levels (int): Number of earliest detection levels whose scores are quality-calibrated.
+            reg_max (int): Maximum number of DFL channels.
+            end2end (bool): Whether to use end-to-end detection.
+            ch (tuple): Detection feature channels.
+        """
+        super().__init__(nc=nc, reg_max=reg_max, end2end=end2end, ch=ch)
+        c4 = max(16, ch[0] // 4)
+        self.quality_loss_gain = float(quality_loss_gain)
+        self.quality_small_thr = float(quality_small_thr)
+        self.quality_small_gain = float(quality_small_gain)
+        self.quality_levels = int(quality_levels)
+        self.cv4 = nn.ModuleList(
+            nn.Sequential(
+                nn.Sequential(DWConv(x, x, 3), Conv(x, c4, 1)),
+                nn.Sequential(DWConv(c4, c4, 3), Conv(c4, c4, 1)),
+                nn.Conv2d(c4, 1, 1),
+            )
+            for x in ch
+        )
+        if end2end:
+            self.one2one_cv4 = copy.deepcopy(self.cv4)
+
+    @property
+    def one2many(self):
+        """Return one-to-many heads, including localization quality prediction."""
+        return dict(box_head=self.cv2, cls_head=self.cv3, quality_head=self.cv4)
+
+    @property
+    def one2one(self):
+        """Return one-to-one heads, including localization quality prediction."""
+        return dict(box_head=self.one2one_cv2, cls_head=self.one2one_cv3, quality_head=self.one2one_cv4)
+
+    def forward_head(
+        self,
+        x: list[torch.Tensor],
+        box_head: torch.nn.Module = None,
+        cls_head: torch.nn.Module = None,
+        quality_head: torch.nn.Module = None,
+    ) -> dict[str, torch.Tensor]:
+        """Concatenate box, class, and localization-quality predictions."""
+        preds = super().forward_head(x, box_head=box_head, cls_head=cls_head)
+        if not preds or quality_head is None:
+            return preds
+        bs = x[0].shape[0]
+        preds["quality"] = torch.cat([quality_head[i](x[i]).view(bs, 1, -1) for i in range(self.nl)], dim=-1)
+        return preds
+
+    def _quality_level_mask(self, feats: list[torch.Tensor], device: torch.device) -> torch.Tensor:
+        """Create a mask for detection levels that should use quality-calibrated scores."""
+        masks = []
+        for i, feat in enumerate(feats):
+            enabled = self.quality_levels <= 0 or i < self.quality_levels
+            masks.append(torch.full((feat.shape[2] * feat.shape[3],), enabled, dtype=torch.bool, device=device))
+        return torch.cat(masks, 0)
+
+    def _inference(self, x: dict[str, torch.Tensor]) -> torch.Tensor:
+        """Decode boxes and calibrate small-object-level class scores with predicted quality."""
+        dbox = self._get_decode_boxes(x)
+        scores = x["scores"].sigmoid()
+        quality = x.get("quality")
+        if quality is not None:
+            quality = quality.sigmoid()
+            if self.quality_levels > 0 and self.quality_levels < self.nl:
+                mask = self._quality_level_mask(x["feats"], quality.device).view(1, 1, -1)
+                quality = torch.where(mask, quality, torch.ones_like(quality))
+            scores = scores * quality
+        return torch.cat((dbox, scores), 1)
+
+    def bias_init(self):
+        """Initialize Detect and quality branch biases."""
+        super().bias_init()
+        for q in self.cv4:
+            q[-1].bias.data.zero_()
+        if self.end2end:
+            for q in self.one2one_cv4:
+                q[-1].bias.data.zero_()
 
 
 class Segment(Detect):
