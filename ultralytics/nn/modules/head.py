@@ -265,6 +265,43 @@ class Detect(nn.Module):
         self.cv2 = self.cv3 = None
 
 
+class DetectIMPD(Detect):
+    """YOLO Detect head that uses Inner-MPDIoU for box regression loss."""
+
+    def __init__(self, nc: int = 80, inner_mpdiou_ratio: float = 0.7, reg_max=16, end2end=False, ch: tuple = ()):
+        """Initialize a standard Detect head with Inner-MPDIoU loss metadata."""
+        super().__init__(nc=nc, reg_max=reg_max, end2end=end2end, ch=ch)
+        self.box_loss_type = "inner_mpdiou"
+        self.inner_mpdiou_ratio = float(inner_mpdiou_ratio)
+
+
+class DetectDSLA(Detect):
+    """YOLO Detect head with DSLA-style dynamic smooth classification targets."""
+
+    def __init__(
+        self,
+        nc: int = 80,
+        interval_relaxation_factor: float = 0.2,
+        qfl_beta: float = 2.0,
+        scale_range_factor: float = 8.0,
+        use_tal_score: bool = True,
+        reg_max=16,
+        end2end=False,
+        ch: tuple = (),
+    ):
+        """Initialize a standard Detect head with DSLA loss metadata."""
+        super().__init__(nc=nc, reg_max=reg_max, end2end=end2end, ch=ch)
+        self.dsla_enabled = True
+        self.dsla_interval_relaxation_factor = float(interval_relaxation_factor)
+        self.dsla_qfl_beta = float(qfl_beta)
+        self.dsla_scale_range_factor = float(scale_range_factor)
+        self.dsla_use_tal_score = bool(use_tal_score)
+        self.dsla_core_zone = True
+        self.dsla_scale_prior = True
+        self.dsla_iou_coupling = True
+        self.dsla_use_quality_focal = True
+
+
 class DetectBAB(Detect):
     """YOLO Detect head with a training-only boundary-aware auxiliary branch."""
 

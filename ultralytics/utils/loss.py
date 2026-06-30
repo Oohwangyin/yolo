@@ -15,7 +15,7 @@ from ultralytics.utils.ops import crop_mask, xywh2xyxy, xyxy2xywh
 from ultralytics.utils.tal import RotatedTaskAlignedAssigner, TaskAlignedAssigner, dist2bbox, dist2rbox, make_anchors
 from ultralytics.utils.torch_utils import autocast
 
-from .metrics import bbox_iou, probiou
+from .metrics import bbox_inner_mpdiou, bbox_iou, probiou
 from .tal import bbox2dist, rbox2dist
 
 
@@ -86,6 +86,24 @@ class FocalLoss(nn.Module):
         return loss.mean(1).sum()
 
 
+class QualityFocalLoss(nn.Module):
+    """Quality Focal Loss for soft classification-quality targets."""
+
+    def __init__(self, beta: float = 2.0):
+        """Initialize Quality Focal Loss with the modulating exponent."""
+        super().__init__()
+        self.beta = beta
+
+    def forward(self, pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+        """Return element-wise QFL loss for targets in [0, 1]."""
+        with autocast(enabled=False):
+            pred = pred.float()
+            target = target.float()
+            scale_factor = (target - pred.sigmoid()).abs().pow(self.beta)
+            loss = F.binary_cross_entropy_with_logits(pred, target, reduction="none") * scale_factor
+        return loss
+
+
 class DFLoss(nn.Module):
     """Criterion class for computing Distribution Focal Loss (DFL)."""
 
@@ -110,10 +128,12 @@ class DFLoss(nn.Module):
 class BboxLoss(nn.Module):
     """Criterion class for computing training losses for bounding boxes."""
 
-    def __init__(self, reg_max: int = 16):
+    def __init__(self, reg_max: int = 16, box_loss_type: str = "ciou", inner_mpdiou_ratio: float = 0.7):
         """Initialize the BboxLoss module with regularization maximum and DFL settings."""
         super().__init__()
         self.dfl_loss = DFLoss(reg_max) if reg_max > 1 else None
+        self.box_loss_type = box_loss_type
+        self.inner_mpdiou_ratio = inner_mpdiou_ratio
 
     def forward(
         self,
@@ -129,7 +149,19 @@ class BboxLoss(nn.Module):
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Compute IoU and DFL losses for bounding boxes."""
         weight = target_scores.sum(-1)[fg_mask].unsqueeze(-1)
-        iou = bbox_iou(pred_bboxes[fg_mask], target_bboxes[fg_mask], xywh=False, CIoU=True)
+        if self.box_loss_type == "inner_mpdiou":
+            img_h, img_w = imgsz[0], imgsz[1]
+            mpdiou_hw = (img_w / stride).pow(2) + (img_h / stride).pow(2)
+            mpdiou_hw = mpdiou_hw.unsqueeze(0).expand(pred_bboxes.shape[0], -1, -1)
+            iou = bbox_inner_mpdiou(
+                pred_bboxes[fg_mask],
+                target_bboxes[fg_mask],
+                xywh=False,
+                ratio=self.inner_mpdiou_ratio,
+                mpdiou_hw=mpdiou_hw[fg_mask],
+            )
+        else:
+            iou = bbox_iou(pred_bboxes[fg_mask], target_bboxes[fg_mask], xywh=False, CIoU=True)
         loss_iou = ((1.0 - iou) * weight).sum() / target_scores_sum
 
         # DFL loss
@@ -355,6 +387,17 @@ class v8DetectionLoss:
         self.quality_small_thr = float(getattr(m, "quality_small_thr", 32.0))
         self.quality_small_gain = float(getattr(m, "quality_small_gain", 1.5))
         self.quality_levels = int(getattr(m, "quality_levels", 0))
+        self.box_loss_type = str(getattr(m, "box_loss_type", "ciou"))
+        self.inner_mpdiou_ratio = float(getattr(m, "inner_mpdiou_ratio", 0.7))
+        self.dsla_enabled = bool(getattr(m, "dsla_enabled", False))
+        self.dsla_interval_relaxation_factor = float(getattr(m, "dsla_interval_relaxation_factor", 0.2))
+        self.dsla_qfl_beta = float(getattr(m, "dsla_qfl_beta", 2.0))
+        self.dsla_scale_range_factor = float(getattr(m, "dsla_scale_range_factor", 8.0))
+        self.dsla_use_tal_score = bool(getattr(m, "dsla_use_tal_score", True))
+        self.dsla_core_zone = bool(getattr(m, "dsla_core_zone", True))
+        self.dsla_scale_prior = bool(getattr(m, "dsla_scale_prior", True))
+        self.dsla_iou_coupling = bool(getattr(m, "dsla_iou_coupling", True))
+        self.dsla_use_quality_focal = bool(getattr(m, "dsla_use_quality_focal", True))
 
         self.use_dfl = m.reg_max > 1
 
@@ -371,7 +414,8 @@ class v8DetectionLoss:
             stride=self.stride.tolist(),
             topk2=tal_topk2,
         )
-        self.bbox_loss = BboxLoss(m.reg_max).to(device)
+        self.bbox_loss = BboxLoss(m.reg_max, self.box_loss_type, self.inner_mpdiou_ratio).to(device)
+        self.qfl = QualityFocalLoss(self.dsla_qfl_beta)
         self.proj = torch.arange(m.reg_max, dtype=torch.float, device=device)
 
     def preprocess(self, targets: torch.Tensor, batch_size: int, scale_tensor: torch.Tensor) -> torch.Tensor:
@@ -400,6 +444,105 @@ class v8DetectionLoss:
             # pred_dist = pred_dist.view(b, a, c // 4, 4).transpose(2,3).softmax(3).matmul(self.proj.type(pred_dist.dtype))
             # pred_dist = (pred_dist.view(b, a, c // 4, 4).softmax(2) * self.proj.type(pred_dist.dtype).view(1, 1, -1, 1)).sum(2)
         return dist2bbox(pred_dist, anchor_points, xywh=False)
+
+    def dsla_prior_bboxes(self, target_bboxes: torch.Tensor, stride_tensor: torch.Tensor) -> torch.Tensor:
+        """Expand tiny target boxes for DSLA center-prior computation only."""
+        centers = (target_bboxes[..., :2] + target_bboxes[..., 2:]) / 2
+        wh = (target_bboxes[..., 2:] - target_bboxes[..., :2]).clamp_min(0.0)
+        min_wh = stride_tensor.view(1, -1, 1).expand_as(wh)
+        wh = torch.maximum(wh, min_wh)
+        return torch.cat((centers - wh / 2, centers + wh / 2), dim=-1)
+
+    def dsla_center_prior(
+        self, target_bboxes: torch.Tensor, anchor_points: torch.Tensor, stride_tensor: torch.Tensor, fg_mask: torch.Tensor
+    ) -> torch.Tensor:
+        """Calculate centerness with a core zone for DSLA soft labels."""
+        prior_bboxes = self.dsla_prior_bboxes(target_bboxes, stride_tensor)
+        points = (anchor_points * stride_tensor).view(1, -1, 2)
+        px, py = points[..., 0], points[..., 1]
+        x1, y1, x2, y2 = prior_bboxes.unbind(-1)
+        left, right = px - x1, x2 - px
+        top, bottom = py - y1, y2 - py
+        inside = torch.stack((left, top, right, bottom), dim=-1).amin(-1).gt_(0.0)
+
+        lr_min, lr_max = left.minimum(right).clamp_min(0.0), left.maximum(right).clamp_min(0.01)
+        tb_min, tb_max = top.minimum(bottom).clamp_min(0.0), top.maximum(bottom).clamp_min(0.01)
+        prior = torch.sqrt((lr_min / lr_max) * (tb_min / tb_max))
+
+        if self.dsla_core_zone:
+            centers = (prior_bboxes[..., :2] + prior_bboxes[..., 2:]) / 2
+            half_stride = stride_tensor.view(1, -1) / 2
+            in_core = (
+                (px - centers[..., 0]).abs().le(half_stride)
+                & (py - centers[..., 1]).abs().le(half_stride)
+                & inside
+            )
+            prior = torch.where(in_core, torch.ones_like(prior), prior)
+
+        return prior.clamp_(0.0, 1.0) * fg_mask
+
+    def dsla_scale_relaxation_prior(
+        self, target_bboxes: torch.Tensor, stride_tensor: torch.Tensor, fg_mask: torch.Tensor
+    ) -> torch.Tensor:
+        """Calculate a DSLA-style relaxed level prior for P2/P3/P4 feature levels."""
+        if not self.dsla_scale_prior:
+            return torch.ones_like(fg_mask, dtype=target_bboxes.dtype)
+
+        wh = (target_bboxes[..., 2:] - target_bboxes[..., :2]).clamp_min(0.0)
+        measure = wh.amax(-1)
+        scores = torch.zeros_like(measure)
+        strides = self.stride.to(device=target_bboxes.device, dtype=target_bboxes.dtype)
+        anchor_strides = stride_tensor.squeeze(-1).to(dtype=target_bboxes.dtype)
+        boundaries = strides[:-1] * self.dsla_scale_range_factor
+        k = self.dsla_interval_relaxation_factor
+
+        for i, stride in enumerate(strides):
+            lower = measure.new_tensor(0.0) if i == 0 else boundaries[i - 1]
+            upper = measure.new_tensor(float("inf")) if i == len(strides) - 1 else boundaries[i]
+            level_mask = anchor_strides.eq(stride).view(1, -1)
+
+            level_score = ((measure >= lower) & (measure <= upper)).to(measure.dtype)
+            if k > 0.0 and i > 0:
+                relaxed_lower = lower * (1.0 - k)
+                left_mask = (measure >= relaxed_lower) & (measure < lower)
+                left_score = (measure - relaxed_lower) / (lower - relaxed_lower).clamp_min(0.01)
+                level_score = torch.where(left_mask, left_score, level_score)
+            if k > 0.0 and i < len(strides) - 1:
+                relaxed_upper = upper * (1.0 + k)
+                right_mask = (measure > upper) & (measure <= relaxed_upper)
+                right_score = (relaxed_upper - measure) / (relaxed_upper - upper).clamp_min(0.01)
+                level_score = torch.where(right_mask, right_score, level_score)
+
+            scores = torch.where(level_mask, level_score, scores)
+
+        return scores.clamp_(0.0, 1.0) * fg_mask
+
+    def dynamic_smooth_label_targets(
+        self,
+        target_scores: torch.Tensor,
+        target_bboxes: torch.Tensor,
+        fg_mask: torch.Tensor,
+        anchor_points: torch.Tensor,
+        stride_tensor: torch.Tensor,
+        pred_bboxes: torch.Tensor,
+    ) -> torch.Tensor:
+        """Build DSLA-style classification soft targets for YOLOv8 TAL positives."""
+        if not fg_mask.any():
+            return target_scores
+
+        smooth_quality = self.dsla_center_prior(target_bboxes, anchor_points, stride_tensor, fg_mask)
+        smooth_quality *= self.dsla_scale_relaxation_prior(target_bboxes, stride_tensor, fg_mask)
+
+        if self.dsla_iou_coupling:
+            iou_quality = smooth_quality.new_zeros(smooth_quality.shape)
+            iou_quality[fg_mask] = bbox_iou(
+                pred_bboxes[fg_mask], target_bboxes[fg_mask], xywh=False
+            ).detach().clamp_(0.0, 1.0).squeeze(-1)
+            smooth_quality *= iou_quality
+
+        smooth_quality = smooth_quality.unsqueeze(-1).clamp_(0.0, 1.0)
+        base_scores = target_scores if self.dsla_use_tal_score else target_scores.gt(0).to(target_scores.dtype)
+        return base_scores * smooth_quality
 
     def get_assigned_targets_and_loss(self, preds: dict[str, torch.Tensor], batch: dict[str, Any]) -> tuple:
         """Calculate the sum of the loss for box, cls and dfl multiplied by batch size and return foreground mask and
@@ -434,13 +577,28 @@ class v8DetectionLoss:
             mask_gt,
         )
 
+        if self.dsla_enabled:
+            target_scores = self.dynamic_smooth_label_targets(
+                target_scores,
+                target_bboxes,
+                fg_mask,
+                anchor_points,
+                stride_tensor,
+                pred_bboxes.detach() * stride_tensor,
+            )
+
         target_scores_sum = max(target_scores.sum(), 1)
 
         # Cls loss with optional class weighting
-        bce_loss = self.bce(pred_scores, target_scores.to(dtype))  # (bs, num_anchors, nc)
+        target_scores = target_scores.to(dtype)
+        cls_loss = (
+            self.qfl(pred_scores, target_scores)
+            if self.dsla_enabled and self.dsla_use_quality_focal
+            else self.bce(pred_scores, target_scores)
+        )
         if self.class_weights is not None:
-            bce_loss *= self.class_weights
-        loss[1] = bce_loss.sum() / target_scores_sum  # BCE
+            cls_loss *= self.class_weights
+        loss[1] = cls_loss.sum() / target_scores_sum
 
         # Bbox loss
         if fg_mask.sum():
