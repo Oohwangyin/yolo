@@ -463,7 +463,7 @@ class v8DetectionLoss:
         x1, y1, x2, y2 = prior_bboxes.unbind(-1)
         left, right = px - x1, x2 - px
         top, bottom = py - y1, y2 - py
-        inside = torch.stack((left, top, right, bottom), dim=-1).amin(-1).gt_(0.0)
+        inside = torch.stack((left, top, right, bottom), dim=-1).amin(-1) > 0.0
 
         lr_min, lr_max = left.minimum(right).clamp_min(0.0), left.maximum(right).clamp_min(0.01)
         tb_min, tb_max = top.minimum(bottom).clamp_min(0.0), top.maximum(bottom).clamp_min(0.01)
@@ -475,7 +475,7 @@ class v8DetectionLoss:
             in_core = (
                 (px - centers[..., 0]).abs().le(half_stride)
                 & (py - centers[..., 1]).abs().le(half_stride)
-                & inside
+                & inside.bool()
             )
             prior = torch.where(in_core, torch.ones_like(prior), prior)
 
