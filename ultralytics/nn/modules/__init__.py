@@ -86,6 +86,7 @@ from .fdconv import FDConv
 from .fafm import FAFM
 from .fem import FEM
 from .rfaconv import RFAConv
+from .serank import SeRankLite
 from .shdc import SHDCBlock, SHDCLite
 from .head import (
     OBB,
@@ -122,7 +123,6 @@ from .transformer import (
     TransformerEncoderLayer,
     TransformerLayer,
 )
-from .PGHeadEnhance import PGHeadEnhance
 
 __all__ = (
     "AIFI",
@@ -196,7 +196,6 @@ __all__ = (
     "MaxSigmoidAttnBlock",
     "MGAM",
     "MCGAM",
-    "PGHeadEnhance",
     "Pose",
     "Pose26",
     "Proto",
@@ -214,6 +213,7 @@ __all__ = (
     "Segment",
     "Segment26",
     "SemanticSegment",
+    "SeRankLite",
     "SpatialAttention",
     "TorchVision",
     "TransformerBlock",

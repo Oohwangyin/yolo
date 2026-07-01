@@ -21,7 +21,6 @@ from ultralytics.nn.modules import (
     ELAN1,
     OBB,
     OBB26,
-    PGHeadEnhance,
     PSA,
     SPP,
     SPPELAN,
@@ -85,6 +84,7 @@ from ultralytics.nn.modules import (
     Segment,
     Segment26,
     SemanticSegment,
+    SeRankLite,
     TorchVision,
     WorldDetect,
     YOLOEDetect,
@@ -1733,6 +1733,7 @@ def parse_model(d, ch, verbose=True):
             SHAB,
             SHDCBlock,
             SHDCLite,
+            SeRankLite,
             C2fCIB,
             A2C2f,
         }
@@ -1870,9 +1871,6 @@ def parse_model(d, ch, verbose=True):
             args.insert(1, [ch[x] for x in f])  # channels as second arg
         elif m is RTDETRDecoder:  # special case, channels arg must be passed in index 1
             args.insert(1, [ch[x] for x in f])
-        elif m is PGHeadEnhance:
-            c2 = ch[f]
-            args = [c2, *args]
         elif m is CBLinear:
             c2 = args[0]
             c1 = ch[f]
