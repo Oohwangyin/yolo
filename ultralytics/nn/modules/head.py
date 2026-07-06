@@ -313,6 +313,8 @@ class DetectGDA(Detect):
         decay_epochs: int = 100,
         cls_gain: float = 0.25,
         power: float = 1.0,
+        min_weight: float = 0.75,
+        max_weight: float = 1.25,
         reg_max=16,
         end2end=False,
         ch: tuple = (),
@@ -324,6 +326,8 @@ class DetectGDA(Detect):
         self.gda_decay_epochs = int(decay_epochs)
         self.gda_cls_gain = float(cls_gain)
         self.gda_power = float(power)
+        self.gda_min_weight = float(min_weight)
+        self.gda_max_weight = float(max_weight)
 
 
 class DetectBAB(Detect):

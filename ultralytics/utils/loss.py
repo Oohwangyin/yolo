@@ -406,6 +406,10 @@ class v8DetectionLoss:
         self.gda_decay_epochs = max(int(getattr(m, "gda_decay_epochs", 100)), 0)
         self.gda_cls_gain = float(getattr(m, "gda_cls_gain", 0.0))
         self.gda_power = max(float(getattr(m, "gda_power", 1.0)), 1e-6)
+        self.gda_min_weight = float(getattr(m, "gda_min_weight", 0.75))
+        self.gda_max_weight = float(getattr(m, "gda_max_weight", 1.25))
+        if self.gda_min_weight > self.gda_max_weight:
+            self.gda_min_weight, self.gda_max_weight = self.gda_max_weight, self.gda_min_weight
         self.gda_epoch = 0
 
         self.use_dfl = m.reg_max > 1
@@ -461,6 +465,8 @@ class v8DetectionLoss:
             reliability = reliability.pow(self.gda_power)
 
         weights = 1.0 + gain * reliability
+        weights = weights / weights[fg_mask].mean().clamp_min(1e-6)
+        weights = weights.clamp_(self.gda_min_weight, self.gda_max_weight)
         return torch.where(fg_mask, weights, torch.ones_like(weights))
 
     def preprocess(self, targets: torch.Tensor, batch_size: int, scale_tensor: torch.Tensor) -> torch.Tensor:
