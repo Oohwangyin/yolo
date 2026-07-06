@@ -25,6 +25,7 @@ __all__ = (
     "Classify",
     "Detect",
     "DetectBAB",
+    "DetectGDA",
     "DetectSQ",
     "DetectSAB",
     "Pose",
@@ -300,6 +301,29 @@ class DetectDSLA(Detect):
         self.dsla_scale_prior = True
         self.dsla_iou_coupling = True
         self.dsla_use_quality_focal = True
+
+
+class DetectGDA(Detect):
+    """YOLO Detect head with GDA-style geometric loss reweighting metadata."""
+
+    def __init__(
+        self,
+        nc: int = 80,
+        max_gain: float = 2.0,
+        decay_epochs: int = 100,
+        cls_gain: float = 0.25,
+        power: float = 1.0,
+        reg_max=16,
+        end2end=False,
+        ch: tuple = (),
+    ):
+        """Initialize a standard Detect head with training-only GDA loss metadata."""
+        super().__init__(nc=nc, reg_max=reg_max, end2end=end2end, ch=ch)
+        self.gda_enabled = True
+        self.gda_max_gain = float(max_gain)
+        self.gda_decay_epochs = int(decay_epochs)
+        self.gda_cls_gain = float(cls_gain)
+        self.gda_power = float(power)
 
 
 class DetectBAB(Detect):

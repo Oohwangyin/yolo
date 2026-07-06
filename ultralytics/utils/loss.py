@@ -146,9 +146,12 @@ class BboxLoss(nn.Module):
         fg_mask: torch.Tensor,
         imgsz: torch.Tensor,
         stride: torch.Tensor,
+        gda_weight: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Compute IoU and DFL losses for bounding boxes."""
         weight = target_scores.sum(-1)[fg_mask].unsqueeze(-1)
+        if gda_weight is not None:
+            weight = weight * gda_weight[fg_mask].to(weight.dtype).unsqueeze(-1)
         if self.box_loss_type == "inner_mpdiou":
             img_h, img_w = imgsz[0], imgsz[1]
             mpdiou_hw = (img_w / stride).pow(2) + (img_h / stride).pow(2)
@@ -398,6 +401,12 @@ class v8DetectionLoss:
         self.dsla_scale_prior = bool(getattr(m, "dsla_scale_prior", True))
         self.dsla_iou_coupling = bool(getattr(m, "dsla_iou_coupling", True))
         self.dsla_use_quality_focal = bool(getattr(m, "dsla_use_quality_focal", True))
+        self.gda_enabled = bool(getattr(m, "gda_enabled", False))
+        self.gda_max_gain = float(getattr(m, "gda_max_gain", 2.0))
+        self.gda_decay_epochs = max(int(getattr(m, "gda_decay_epochs", 100)), 0)
+        self.gda_cls_gain = float(getattr(m, "gda_cls_gain", 0.0))
+        self.gda_power = max(float(getattr(m, "gda_power", 1.0)), 1e-6)
+        self.gda_epoch = 0
 
         self.use_dfl = m.reg_max > 1
 
@@ -417,6 +426,42 @@ class v8DetectionLoss:
         self.bbox_loss = BboxLoss(m.reg_max, self.box_loss_type, self.inner_mpdiou_ratio).to(device)
         self.qfl = QualityFocalLoss(self.dsla_qfl_beta)
         self.proj = torch.arange(m.reg_max, dtype=torch.float, device=device)
+
+    def update(self):
+        """Update epoch-dependent training-only loss state."""
+        self.gda_epoch += 1
+
+    def set_epoch(self, epoch: int):
+        """Set current epoch for external trainers that expose it before loss computation."""
+        self.gda_epoch = max(int(epoch), 0)
+
+    def gda_current_gain(self) -> float:
+        """Return the current GDA gain with a paper-style decay toward vanilla supervision."""
+        if not self.gda_enabled or self.gda_max_gain <= 0.0:
+            return 0.0
+        if self.gda_decay_epochs <= 0:
+            return self.gda_max_gain
+        progress = min(self.gda_epoch / self.gda_decay_epochs, 1.0)
+        return self.gda_max_gain * (1.0 - progress)
+
+    def geometric_distance_weights(
+        self, target_bboxes: torch.Tensor, anchor_points: torch.Tensor, fg_mask: torch.Tensor
+    ) -> torch.Tensor | None:
+        """Build GDA-style positive-sample weights from anchor-to-box-boundary distance."""
+        gain = self.gda_current_gain()
+        if gain <= 0.0 or not fg_mask.any():
+            return None
+
+        target_ltrb = bbox2dist(anchor_points, target_bboxes)
+        edge_distance = target_ltrb.amin(dim=-1).clamp_min(0.0)
+        wh = (target_bboxes[..., 2:4] - target_bboxes[..., 0:2]).clamp_min(1.0)
+        half_min_side = (wh.amin(dim=-1) * 0.5).clamp_min(1.0)
+        reliability = (edge_distance / half_min_side).clamp_(0.0, 1.0)
+        if self.gda_power != 1.0:
+            reliability = reliability.pow(self.gda_power)
+
+        weights = 1.0 + gain * reliability
+        return torch.where(fg_mask, weights, torch.ones_like(weights))
 
     def preprocess(self, targets: torch.Tensor, batch_size: int, scale_tensor: torch.Tensor) -> torch.Tensor:
         """Preprocess targets by converting to tensor format and scaling coordinates."""
@@ -588,6 +633,11 @@ class v8DetectionLoss:
             )
 
         target_scores_sum = max(target_scores.sum(), 1)
+        gda_weight = (
+            self.geometric_distance_weights(target_bboxes / stride_tensor, anchor_points, fg_mask)
+            if self.gda_enabled
+            else None
+        )
 
         # Cls loss with optional class weighting
         target_scores = target_scores.to(dtype)
@@ -596,6 +646,9 @@ class v8DetectionLoss:
             if self.dsla_enabled and self.dsla_use_quality_focal
             else self.bce(pred_scores, target_scores)
         )
+        if gda_weight is not None and self.gda_cls_gain > 0.0:
+            cls_gda_weight = 1.0 + (gda_weight.to(dtype).unsqueeze(-1) - 1.0) * self.gda_cls_gain
+            cls_loss *= torch.where(target_scores.gt(0.0), cls_gda_weight, torch.ones_like(cls_gda_weight))
         if self.class_weights is not None:
             cls_loss *= self.class_weights
         loss[1] = cls_loss.sum() / target_scores_sum
@@ -612,6 +665,7 @@ class v8DetectionLoss:
                 fg_mask,
                 imgsz,
                 stride_tensor,
+                gda_weight,
             )
 
         loss[0] *= self.hyp.box  # box gain
