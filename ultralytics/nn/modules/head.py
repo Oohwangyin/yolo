@@ -26,6 +26,7 @@ __all__ = (
     "Detect",
     "DetectBAB",
     "DetectGDA",
+    "DetectTLoss",
     "DetectSQ",
     "DetectSAB",
     "Pose",
@@ -328,6 +329,36 @@ class DetectGDA(Detect):
         self.gda_power = float(power)
         self.gda_min_weight = float(min_weight)
         self.gda_max_weight = float(max_weight)
+
+
+class DetectTLoss(Detect):
+    """YOLO Detect head with training-only Student-t robust box loss metadata."""
+
+    def __init__(
+        self,
+        nc: int = 80,
+        nu: float = 1.0,
+        mix: float = 1.0,
+        learnable: bool = True,
+        include_nll: bool = True,
+        eps: float = 1e-6,
+        reg_max=16,
+        end2end=False,
+        ch: tuple = (),
+    ):
+        """Initialize a standard Detect head with T-Loss box regression metadata."""
+        super().__init__(nc=nc, reg_max=reg_max, end2end=end2end, ch=ch)
+        self.tloss_enabled = True
+        self.tloss_mix = float(mix)
+        self.tloss_include_nll = bool(include_nll)
+        self.tloss_eps = max(float(eps), 1e-12)
+
+        init_nu = max(float(nu), self.tloss_eps)
+        log_nu = torch.log(torch.tensor(init_nu, dtype=torch.float))
+        if learnable:
+            self.tloss_log_nu = nn.Parameter(log_nu)
+        else:
+            self.register_buffer("tloss_log_nu", log_nu)
 
 
 class DetectBAB(Detect):

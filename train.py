@@ -1,6 +1,6 @@
 from ultralytics import YOLO
 
-model = YOLO("ultralytics/cfg/models/v8/yolov8s-FAFM-Lite-SeRank.yaml")
+model = YOLO("ultralytics/cfg/models/v8/yolov8s-FAFM-Lite-GDA.yaml")
 
 model.train(
     data="VisDrone.yaml",
@@ -12,6 +12,6 @@ model.train(
     pretrained=False,
     cos_lr=True,
     close_mosaic=20,
-    project="VisDrone/yolov8s-FAFM-Lite-SeRank",
+    project="VisDrone/yolov8s-FAFM-Lite-GDA",
     deterministic=False,
 )

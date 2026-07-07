@@ -135,6 +135,26 @@ class BboxLoss(nn.Module):
         self.box_loss_type = box_loss_type
         self.inner_mpdiou_ratio = inner_mpdiou_ratio
 
+    @staticmethod
+    def student_t_iou_loss(
+        residual: torch.Tensor,
+        log_nu: torch.Tensor,
+        include_nll: bool = True,
+        eps: float = 1e-6,
+    ) -> torch.Tensor:
+        """Apply a Student-t negative-log-likelihood style transform to IoU residuals."""
+        log_nu = log_nu.to(device=residual.device, dtype=residual.dtype).clamp(math.log(eps), math.log(100.0))
+        nu = log_nu.exp().clamp_min(eps)
+        loss = 0.5 * (nu + 1.0) * torch.log1p(residual.clamp_min(0.0) / nu)
+        if include_nll:
+            loss = (
+                loss
+                - torch.lgamma(0.5 * (nu + 1.0))
+                + torch.lgamma(0.5 * nu)
+                + 0.5 * (log_nu + math.log(math.pi))
+            )
+        return loss
+
     def forward(
         self,
         pred_dist: torch.Tensor,
@@ -147,6 +167,10 @@ class BboxLoss(nn.Module):
         imgsz: torch.Tensor,
         stride: torch.Tensor,
         gda_weight: torch.Tensor | None = None,
+        tloss_log_nu: torch.Tensor | None = None,
+        tloss_mix: float = 1.0,
+        tloss_include_nll: bool = True,
+        tloss_eps: float = 1e-6,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Compute IoU and DFL losses for bounding boxes."""
         weight = target_scores.sum(-1)[fg_mask].unsqueeze(-1)
@@ -165,7 +189,12 @@ class BboxLoss(nn.Module):
             )
         else:
             iou = bbox_iou(pred_bboxes[fg_mask], target_bboxes[fg_mask], xywh=False, CIoU=True)
-        loss_iou = ((1.0 - iou) * weight).sum() / target_scores_sum
+        iou_residual = 1.0 - iou
+        if tloss_log_nu is not None and tloss_mix > 0.0:
+            robust_iou = self.student_t_iou_loss(iou_residual, tloss_log_nu, tloss_include_nll, tloss_eps)
+            mix = min(max(float(tloss_mix), 0.0), 1.0)
+            iou_residual = iou_residual * (1.0 - mix) + robust_iou * mix
+        loss_iou = (iou_residual * weight).sum() / target_scores_sum
 
         # DFL loss
         if self.dfl_loss:
@@ -411,6 +440,11 @@ class v8DetectionLoss:
         if self.gda_min_weight > self.gda_max_weight:
             self.gda_min_weight, self.gda_max_weight = self.gda_max_weight, self.gda_min_weight
         self.gda_epoch = 0
+        self.tloss_enabled = bool(getattr(m, "tloss_enabled", False))
+        self.tloss_mix = min(max(float(getattr(m, "tloss_mix", 1.0)), 0.0), 1.0)
+        self.tloss_include_nll = bool(getattr(m, "tloss_include_nll", True))
+        self.tloss_eps = max(float(getattr(m, "tloss_eps", 1e-6)), 1e-12)
+        self.tloss_log_nu = getattr(m, "tloss_log_nu", None)
 
         self.use_dfl = m.reg_max > 1
 
@@ -672,6 +706,10 @@ class v8DetectionLoss:
                 imgsz,
                 stride_tensor,
                 gda_weight,
+                self.tloss_log_nu if self.tloss_enabled else None,
+                self.tloss_mix,
+                self.tloss_include_nll,
+                self.tloss_eps,
             )
 
         loss[0] *= self.hyp.box  # box gain
