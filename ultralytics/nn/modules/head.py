@@ -341,10 +341,10 @@ class DetectTLoss(Detect):
         mix: float = 1.0,
         learnable: bool = True,
         include_nll: bool = True,
-        eps: float = 1e-6,
         reg_max=16,
         end2end=False,
         ch: tuple = (),
+        eps: float = 1e-6,
     ):
         """Initialize a standard Detect head with T-Loss box regression metadata."""
         super().__init__(nc=nc, reg_max=reg_max, end2end=end2end, ch=ch)
