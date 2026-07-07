@@ -7,6 +7,9 @@
 
 # Parameters
 nc: 80 # number of classes
+tloss_decay_start: 50 # keep Student-t robust localization through early training
+tloss_decay_epochs: 40 # then linearly decay to vanilla CIoU for high-IoU refinement
+tloss_min_mix: 0.0
 scales: # model compound scaling constants, i.e. 'model=yolov8s-FAFM-Lite-TLoss.yaml' will call yolov8-FAFM-Lite-TLoss.yaml with scale 's'
   # [depth, width, max_channels]
   n: [0.33, 0.25, 1024]

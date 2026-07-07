@@ -440,11 +440,16 @@ class v8DetectionLoss:
         if self.gda_min_weight > self.gda_max_weight:
             self.gda_min_weight, self.gda_max_weight = self.gda_max_weight, self.gda_min_weight
         self.gda_epoch = 0
+        self.updates = 0
         self.tloss_enabled = bool(getattr(m, "tloss_enabled", False))
         self.tloss_mix = min(max(float(getattr(m, "tloss_mix", 1.0)), 0.0), 1.0)
         self.tloss_include_nll = bool(getattr(m, "tloss_include_nll", True))
         self.tloss_eps = max(float(getattr(m, "tloss_eps", 1e-6)), 1e-12)
         self.tloss_log_nu = getattr(m, "tloss_log_nu", None)
+        yaml_cfg = getattr(model, "yaml", {})
+        self.tloss_decay_start = max(int(yaml_cfg.get("tloss_decay_start", 0)), 0)
+        self.tloss_decay_epochs = max(int(yaml_cfg.get("tloss_decay_epochs", 0)), 0)
+        self.tloss_min_mix = min(max(float(yaml_cfg.get("tloss_min_mix", self.tloss_mix)), 0.0), self.tloss_mix)
 
         self.use_dfl = m.reg_max > 1
 
@@ -467,11 +472,13 @@ class v8DetectionLoss:
 
     def update(self):
         """Update epoch-dependent training-only loss state."""
-        self.gda_epoch += 1
+        self.updates = int(getattr(self, "updates", self.gda_epoch)) + 1
+        self.gda_epoch = self.updates
 
     def set_epoch(self, epoch: int):
         """Set current epoch for external trainers that expose it before loss computation."""
         self.gda_epoch = max(int(epoch), 0)
+        self.updates = self.gda_epoch
 
     def gda_current_gain(self) -> float:
         """Return the current GDA gain with a paper-style decay toward vanilla supervision."""
@@ -481,6 +488,15 @@ class v8DetectionLoss:
             return self.gda_max_gain
         progress = min(self.gda_epoch / self.gda_decay_epochs, 1.0)
         return self.gda_max_gain * (1.0 - progress)
+
+    def tloss_current_mix(self) -> float:
+        """Return the current Student-t robust loss blend ratio."""
+        if not self.tloss_enabled or self.tloss_mix <= 0.0:
+            return 0.0
+        if self.tloss_decay_epochs <= 0 or self.gda_epoch <= self.tloss_decay_start:
+            return self.tloss_mix
+        progress = min((self.gda_epoch - self.tloss_decay_start) / self.tloss_decay_epochs, 1.0)
+        return self.tloss_mix + (self.tloss_min_mix - self.tloss_mix) * progress
 
     def geometric_distance_weights(
         self, target_bboxes: torch.Tensor, anchor_points: torch.Tensor, fg_mask: torch.Tensor
@@ -707,7 +723,7 @@ class v8DetectionLoss:
                 stride_tensor,
                 gda_weight,
                 self.tloss_log_nu if self.tloss_enabled else None,
-                self.tloss_mix,
+                self.tloss_current_mix(),
                 self.tloss_include_nll,
                 self.tloss_eps,
             )
