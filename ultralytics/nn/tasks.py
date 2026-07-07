@@ -48,6 +48,7 @@ from ultralytics.nn.modules import (
     ConvTranspose,
     Detect,
     DetectBAB,
+    DetectDiscrimLoss,
     DetectDSLA,
     DetectGDA,
     DetectIMPD,
@@ -1828,6 +1829,7 @@ def parse_model(d, ch, verbose=True):
             {
                 Detect,
                 DetectBAB,
+                DetectDiscrimLoss,
                 DetectDSLA,
                 DetectGDA,
                 DetectIMPD,
@@ -1852,6 +1854,7 @@ def parse_model(d, ch, verbose=True):
             if m in {
                 Detect,
                 DetectBAB,
+                DetectDiscrimLoss,
                 DetectDSLA,
                 DetectGDA,
                 DetectIMPD,

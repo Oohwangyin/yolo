@@ -171,11 +171,22 @@ class BboxLoss(nn.Module):
         tloss_mix: float = 1.0,
         tloss_include_nll: bool = True,
         tloss_eps: float = 1e-6,
+        discrim_weight: torch.Tensor | None = None,
+        discrim_apply_box: bool = True,
+        discrim_apply_dfl: bool = True,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Compute IoU and DFL losses for bounding boxes."""
         weight = target_scores.sum(-1)[fg_mask].unsqueeze(-1)
         if gda_weight is not None:
             weight = weight * gda_weight[fg_mask].to(weight.dtype).unsqueeze(-1)
+        box_weight = weight
+        dfl_weight = weight
+        if discrim_weight is not None:
+            positive_discrim_weight = discrim_weight[fg_mask].to(weight.dtype).unsqueeze(-1)
+            if discrim_apply_box:
+                box_weight = box_weight * positive_discrim_weight
+            if discrim_apply_dfl:
+                dfl_weight = dfl_weight * positive_discrim_weight
         if self.box_loss_type == "inner_mpdiou":
             img_h, img_w = imgsz[0], imgsz[1]
             mpdiou_hw = (img_w / stride).pow(2) + (img_h / stride).pow(2)
@@ -194,12 +205,14 @@ class BboxLoss(nn.Module):
             robust_iou = self.student_t_iou_loss(iou_residual, tloss_log_nu, tloss_include_nll, tloss_eps)
             mix = min(max(float(tloss_mix), 0.0), 1.0)
             iou_residual = iou_residual * (1.0 - mix) + robust_iou * mix
-        loss_iou = (iou_residual * weight).sum() / target_scores_sum
+        loss_iou = (iou_residual * box_weight).sum() / target_scores_sum
 
         # DFL loss
         if self.dfl_loss:
             target_ltrb = bbox2dist(anchor_points, target_bboxes, self.dfl_loss.reg_max - 1)
-            loss_dfl = self.dfl_loss(pred_dist[fg_mask].view(-1, self.dfl_loss.reg_max), target_ltrb[fg_mask]) * weight
+            loss_dfl = (
+                self.dfl_loss(pred_dist[fg_mask].view(-1, self.dfl_loss.reg_max), target_ltrb[fg_mask]) * dfl_weight
+            )
             loss_dfl = loss_dfl.sum() / target_scores_sum
         else:
             target_ltrb = bbox2dist(anchor_points, target_bboxes)
@@ -211,7 +224,8 @@ class BboxLoss(nn.Module):
             pred_dist[..., 0::2] /= imgsz[1]
             pred_dist[..., 1::2] /= imgsz[0]
             loss_dfl = (
-                F.l1_loss(pred_dist[fg_mask], target_ltrb[fg_mask], reduction="none").mean(-1, keepdim=True) * weight
+                F.l1_loss(pred_dist[fg_mask], target_ltrb[fg_mask], reduction="none").mean(-1, keepdim=True)
+                * dfl_weight
             )
             loss_dfl = loss_dfl.sum() / target_scores_sum
 
@@ -404,6 +418,7 @@ class v8DetectionLoss:
         """Initialize v8DetectionLoss with model parameters and task-aligned assignment settings."""
         device = next(model.parameters()).device  # get model device
         h = model.args  # hyperparameters
+        yaml_cfg = getattr(model, "yaml", {})
 
         m = model.model[-1]  # Detect() module
         self.bce = nn.BCEWithLogitsLoss(reduction="none")
@@ -441,12 +456,44 @@ class v8DetectionLoss:
             self.gda_min_weight, self.gda_max_weight = self.gda_max_weight, self.gda_min_weight
         self.gda_epoch = 0
         self.updates = 0
+        self.discrim_enabled = bool(getattr(m, "discrim_enabled", False))
+        self.discrim_ema_momentum = min(
+            max(float(yaml_cfg.get("discrim_ema_momentum", getattr(m, "discrim_ema_momentum", 0.9))), 0.0), 0.999
+        )
+        self.discrim_warmup_epochs = max(
+            int(yaml_cfg.get("discrim_warmup_epochs", getattr(m, "discrim_warmup_epochs", 3))), 0
+        )
+        self.discrim_gamma_max = max(
+            float(yaml_cfg.get("discrim_gamma_max", getattr(m, "discrim_gamma_max", 1.7))), 1.0
+        )
+        self.discrim_gamma_p = max(
+            float(yaml_cfg.get("discrim_gamma_p", getattr(m, "discrim_gamma_p", 0.08))), 1e-6
+        )
+        self.discrim_gamma_q = float(yaml_cfg.get("discrim_gamma_q", getattr(m, "discrim_gamma_q", 60.0)))
+        self.discrim_min_weight = max(
+            float(yaml_cfg.get("discrim_min_weight", getattr(m, "discrim_min_weight", 0.35))), 1e-3
+        )
+        self.discrim_hard_weight = max(
+            float(yaml_cfg.get("discrim_hard_weight", getattr(m, "discrim_hard_weight", 1.35))), 1e-3
+        )
+        self.discrim_incorrect_weight = max(
+            float(yaml_cfg.get("discrim_incorrect_weight", getattr(m, "discrim_incorrect_weight", 0.35))), 1e-3
+        )
+        self.discrim_cls_signal_gain = max(
+            float(yaml_cfg.get("discrim_cls_signal_gain", getattr(m, "discrim_cls_signal_gain", 0.25))), 0.0
+        )
+        self.discrim_es_type = str(yaml_cfg.get("discrim_es_type", getattr(m, "discrim_es_type", "linear")))
+        self.discrim_apply_box = bool(yaml_cfg.get("discrim_apply_box", getattr(m, "discrim_apply_box", True)))
+        self.discrim_apply_cls = bool(yaml_cfg.get("discrim_apply_cls", getattr(m, "discrim_apply_cls", True)))
+        self.discrim_apply_dfl = bool(yaml_cfg.get("discrim_apply_dfl", getattr(m, "discrim_apply_dfl", True)))
+        self.discrim_eps = max(float(yaml_cfg.get("discrim_eps", 1e-6)), 1e-12)
+        self.discrim_k = torch.zeros((), device=device)
+        self.discrim_has_k = False
         self.tloss_enabled = bool(getattr(m, "tloss_enabled", False))
         self.tloss_mix = min(max(float(getattr(m, "tloss_mix", 1.0)), 0.0), 1.0)
         self.tloss_include_nll = bool(getattr(m, "tloss_include_nll", True))
         self.tloss_eps = max(float(getattr(m, "tloss_eps", 1e-6)), 1e-12)
         self.tloss_log_nu = getattr(m, "tloss_log_nu", None)
-        yaml_cfg = getattr(model, "yaml", {})
         self.tloss_decay_start = max(int(yaml_cfg.get("tloss_decay_start", 0)), 0)
         self.tloss_decay_epochs = max(int(yaml_cfg.get("tloss_decay_epochs", 0)), 0)
         self.tloss_min_mix = min(max(float(yaml_cfg.get("tloss_min_mix", self.tloss_mix)), 0.0), self.tloss_mix)
@@ -497,6 +544,78 @@ class v8DetectionLoss:
             return self.tloss_mix
         progress = min((self.gda_epoch - self.tloss_decay_start) / self.tloss_decay_epochs, 1.0)
         return self.tloss_mix + (self.tloss_min_mix - self.tloss_mix) * progress
+
+    def discrim_early_scale(self) -> float:
+        """Return the early-suppression schedule used by DiscrimLoss-style reweighting."""
+        if not self.discrim_enabled or self.discrim_warmup_epochs <= 0:
+            return 1.0
+        progress = min(max((self.gda_epoch + 1) / self.discrim_warmup_epochs, 0.0), 1.0)
+        if self.discrim_es_type == "sin":
+            return math.sin(progress * math.pi / 2)
+        if self.discrim_es_type == "exp":
+            return math.exp(progress - 1.0)
+        if self.discrim_es_type == "piecewise":
+            return 0.2 if progress < 1.0 else 1.0
+        return progress
+
+    def discrim_current_gamma(self) -> float:
+        """Return the current hard/incorrect boundary multiplier."""
+        if not self.discrim_enabled:
+            return 1.0
+        phase = 0.5 * (math.tanh(self.discrim_gamma_p * (self.gda_epoch - self.discrim_gamma_q)) + 1.0)
+        return 1.0 + (self.discrim_gamma_max - 1.0) * phase
+
+    def discrim_positive_weights(
+        self,
+        pred_bboxes: torch.Tensor,
+        target_bboxes: torch.Tensor,
+        target_scores: torch.Tensor,
+        cls_loss: torch.Tensor,
+        fg_mask: torch.Tensor,
+    ) -> torch.Tensor | None:
+        """Build normalized positive-sample weights that separate easy, hard, and likely incorrect samples."""
+        if not self.discrim_enabled or not fg_mask.any():
+            return None
+
+        with torch.no_grad():
+            iou = bbox_iou(pred_bboxes[fg_mask], target_bboxes[fg_mask], xywh=False, CIoU=True).clamp(-1.0, 1.0)
+            loc_signal = (1.0 - iou).view(-1)
+            cls_pos_mask = target_scores.gt(0.0)
+            cls_signal = (cls_loss.detach() * cls_pos_mask).sum(-1)[fg_mask]
+            sample_signal = (loc_signal + self.discrim_cls_signal_gain * cls_signal).clamp_min(0.0)
+
+            batch_k = sample_signal.mean()
+            update_state = pred_bboxes.requires_grad or cls_loss.requires_grad
+            if update_state:
+                if not self.discrim_has_k:
+                    self.discrim_k.copy_(batch_k)
+                    self.discrim_has_k = True
+                else:
+                    self.discrim_k.mul_(self.discrim_ema_momentum).add_(
+                        batch_k, alpha=1.0 - self.discrim_ema_momentum
+                    )
+
+            k = (self.discrim_k if self.discrim_has_k else batch_k).clamp_min(self.discrim_eps)
+            gamma_k = k * self.discrim_current_gamma()
+            es = self.discrim_early_scale()
+            hard_weight = self.discrim_min_weight + es * (self.discrim_hard_weight - self.discrim_min_weight)
+
+            positive_weights = torch.ones_like(sample_signal)
+            hard_mask = sample_signal.gt(k) & sample_signal.le(gamma_k)
+            incorrect_mask = sample_signal.gt(gamma_k)
+            positive_weights = torch.where(hard_mask, positive_weights.new_full((), hard_weight), positive_weights)
+            positive_weights = torch.where(
+                incorrect_mask,
+                positive_weights.new_full((), self.discrim_incorrect_weight),
+                positive_weights,
+            )
+            positive_weights = positive_weights / positive_weights.mean().clamp_min(self.discrim_eps)
+            upper = max(self.discrim_hard_weight, 1.0)
+            positive_weights = positive_weights.clamp_(self.discrim_min_weight, upper)
+
+            weights = torch.ones_like(fg_mask, dtype=target_scores.dtype)
+            weights[fg_mask] = positive_weights.to(dtype=weights.dtype)
+            return weights
 
     def geometric_distance_weights(
         self, target_bboxes: torch.Tensor, anchor_points: torch.Tensor, fg_mask: torch.Tensor
@@ -707,6 +826,20 @@ class v8DetectionLoss:
             cls_loss *= torch.where(target_scores.gt(0.0), cls_gda_weight, torch.ones_like(cls_gda_weight))
         if self.class_weights is not None:
             cls_loss *= self.class_weights
+        discrim_weight = (
+            self.discrim_positive_weights(
+                pred_bboxes,
+                target_bboxes / stride_tensor,
+                target_scores,
+                cls_loss,
+                fg_mask,
+            )
+            if self.discrim_enabled and fg_mask.sum()
+            else None
+        )
+        if discrim_weight is not None and self.discrim_apply_cls:
+            cls_discrim_weight = discrim_weight.to(dtype).unsqueeze(-1)
+            cls_loss *= torch.where(target_scores.gt(0.0), cls_discrim_weight, torch.ones_like(cls_discrim_weight))
         loss[1] = cls_loss.sum() / target_scores_sum
 
         # Bbox loss
@@ -726,6 +859,9 @@ class v8DetectionLoss:
                 self.tloss_current_mix(),
                 self.tloss_include_nll,
                 self.tloss_eps,
+                discrim_weight,
+                self.discrim_apply_box,
+                self.discrim_apply_dfl,
             )
 
         loss[0] *= self.hyp.box  # box gain
