@@ -347,13 +347,9 @@ class DetectDiscrimLoss(Detect):
         self.discrim_enabled = True
         self.discrim_ema_momentum = 0.95
         self.discrim_warmup_epochs = 10
-        self.discrim_gamma_max = 2.3
-        self.discrim_gamma_p = 0.06
-        self.discrim_gamma_q = 90.0
-        self.discrim_min_weight = 0.70
-        self.discrim_hard_weight = 1.20
-        self.discrim_incorrect_weight = 0.60
-        self.discrim_cls_signal_gain = 0.08
+        self.discrim_min_weight = 1.0
+        self.discrim_hard_weight = 1.12
+        self.discrim_cls_signal_gain = 0.05
         self.discrim_es_type = "linear"
         self.discrim_apply_box = True
         self.discrim_apply_cls = False

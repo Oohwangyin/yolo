@@ -7,19 +7,12 @@
 # Parameters
 nc: 80 # number of classes
 discrim_ema_momentum: 0.95 # EMA for level-wise dynamic loss thresholds
-discrim_warmup_epochs: 10 # gradual transition from mild suppression to hard-sample learning
-discrim_gamma_max: 2.3 # late upper hard/incorrect boundary multiplier
-discrim_gamma_p: 0.06 # tanh transition sharpness
-discrim_gamma_q: 90.0 # epoch where hard/incorrect separation becomes prominent
-discrim_incorrect_start_epoch: 70 # do not mark high-loss positives as incorrect before this epoch
-discrim_min_weight: 0.70 # lower bound for reliable positive-sample weights
-discrim_hard_weight: 1.20 # late-stage weight for hard positives
-discrim_incorrect_weight: 0.60 # weight for likely incorrect/noisy positives
-discrim_cls_signal_gain: 0.08 # classification contribution to the discrimination signal
+discrim_warmup_epochs: 10 # gradual transition toward hard-positive enhancement
+discrim_min_weight: 1.00 # never suppress positive samples
+discrim_hard_weight: 1.12 # maximum mild enhancement for hard positives
+discrim_cls_signal_gain: 0.05 # small classification contribution to the hardness signal
 discrim_levelwise: True # maintain separate historical thresholds for P2/P3/P4 positives
-discrim_quality_gain: 0.50 # increase incorrect likelihood for low TAL-quality positives
-discrim_quality_protect_ratio: 0.80 # protect positives above this relative TAL-quality ratio as hard samples
-discrim_es_type: linear # early suppression schedule: linear, sin, exp, piecewise
+discrim_es_type: linear # hard-positive enhancement warmup: linear, sin, exp, piecewise
 discrim_apply_box: True
 discrim_apply_cls: False
 discrim_apply_dfl: False
