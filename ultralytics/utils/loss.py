@@ -486,9 +486,17 @@ class v8DetectionLoss:
         self.discrim_apply_box = bool(yaml_cfg.get("discrim_apply_box", getattr(m, "discrim_apply_box", True)))
         self.discrim_apply_cls = bool(yaml_cfg.get("discrim_apply_cls", getattr(m, "discrim_apply_cls", True)))
         self.discrim_apply_dfl = bool(yaml_cfg.get("discrim_apply_dfl", getattr(m, "discrim_apply_dfl", True)))
+        self.discrim_levelwise = bool(yaml_cfg.get("discrim_levelwise", True))
+        self.discrim_incorrect_start_epoch = max(
+            int(yaml_cfg.get("discrim_incorrect_start_epoch", self.discrim_gamma_q)), 0
+        )
+        self.discrim_quality_gain = max(float(yaml_cfg.get("discrim_quality_gain", 0.5)), 0.0)
+        self.discrim_quality_protect_ratio = max(float(yaml_cfg.get("discrim_quality_protect_ratio", 0.8)), 0.0)
         self.discrim_eps = max(float(yaml_cfg.get("discrim_eps", 1e-6)), 1e-12)
         self.discrim_k = torch.zeros((), device=device)
         self.discrim_has_k = False
+        self.discrim_k_level = torch.zeros(len(self.stride), device=device)
+        self.discrim_has_k_level = torch.zeros(len(self.stride), device=device, dtype=torch.bool)
         self.tloss_enabled = bool(getattr(m, "tloss_enabled", False))
         self.tloss_mix = min(max(float(getattr(m, "tloss_mix", 1.0)), 0.0), 1.0)
         self.tloss_include_nll = bool(getattr(m, "tloss_include_nll", True))
@@ -572,8 +580,9 @@ class v8DetectionLoss:
         target_scores: torch.Tensor,
         cls_loss: torch.Tensor,
         fg_mask: torch.Tensor,
+        stride_tensor: torch.Tensor,
     ) -> torch.Tensor | None:
-        """Build normalized positive-sample weights that separate easy, hard, and likely incorrect samples."""
+        """Build positive-sample weights with level-wise history and TAL-quality protection."""
         if not self.discrim_enabled or not fg_mask.any():
             return None
 
@@ -582,7 +591,25 @@ class v8DetectionLoss:
             loc_signal = (1.0 - iou).view(-1)
             cls_pos_mask = target_scores.gt(0.0)
             cls_signal = (cls_loss.detach() * cls_pos_mask).sum(-1)[fg_mask]
-            sample_signal = (loc_signal + self.discrim_cls_signal_gain * cls_signal).clamp_min(0.0)
+            raw_signal = (loc_signal + self.discrim_cls_signal_gain * cls_signal).clamp_min(0.0)
+
+            anchor_stride = stride_tensor.view(-1).to(device=fg_mask.device)
+            level_ids = torch.zeros_like(anchor_stride, dtype=torch.long)
+            for level_idx, stride_value in enumerate(self.stride.to(device=anchor_stride.device)):
+                level_ids[torch.isclose(anchor_stride, stride_value, rtol=0.0, atol=1e-4)] = level_idx
+            positive_level_ids = level_ids.unsqueeze(0).expand_as(fg_mask)[fg_mask]
+
+            target_quality = target_scores.sum(-1).detach()[fg_mask].clamp_min(0.0)
+            quality_ref = torch.full_like(target_quality, target_quality.mean().clamp_min(self.discrim_eps))
+            if self.discrim_levelwise:
+                for level_idx in range(len(self.stride)):
+                    level_mask = positive_level_ids.eq(level_idx)
+                    if level_mask.any():
+                        quality_ref[level_mask] = target_quality[level_mask].mean().clamp_min(self.discrim_eps)
+
+            quality_norm = (target_quality / quality_ref.clamp_min(self.discrim_eps)).clamp_min(0.0)
+            low_quality_boost = 1.0 + self.discrim_quality_gain * (1.0 - quality_norm.clamp(0.0, 1.0))
+            sample_signal = (raw_signal * low_quality_boost).clamp_min(0.0)
 
             batch_k = sample_signal.mean()
             update_state = pred_bboxes.requires_grad or cls_loss.requires_grad
@@ -595,14 +622,42 @@ class v8DetectionLoss:
                         batch_k, alpha=1.0 - self.discrim_ema_momentum
                     )
 
-            k = (self.discrim_k if self.discrim_has_k else batch_k).clamp_min(self.discrim_eps)
+            if self.discrim_levelwise:
+                k = torch.full_like(sample_signal, (self.discrim_k if self.discrim_has_k else batch_k).item())
+                for level_idx in range(len(self.stride)):
+                    level_mask = positive_level_ids.eq(level_idx)
+                    if not level_mask.any():
+                        continue
+                    level_batch_k = sample_signal[level_mask].mean()
+                    if update_state:
+                        if not bool(self.discrim_has_k_level[level_idx].item()):
+                            self.discrim_k_level[level_idx].copy_(level_batch_k)
+                            self.discrim_has_k_level[level_idx] = True
+                        else:
+                            self.discrim_k_level[level_idx].mul_(self.discrim_ema_momentum).add_(
+                                level_batch_k, alpha=1.0 - self.discrim_ema_momentum
+                            )
+                    level_k = (
+                        self.discrim_k_level[level_idx]
+                        if bool(self.discrim_has_k_level[level_idx].item())
+                        else level_batch_k
+                    )
+                    k[level_mask] = level_k
+            else:
+                k = torch.full_like(sample_signal, (self.discrim_k if self.discrim_has_k else batch_k).item())
+            k = k.clamp_min(self.discrim_eps)
             gamma_k = k * self.discrim_current_gamma()
             es = self.discrim_early_scale()
             hard_weight = self.discrim_min_weight + es * (self.discrim_hard_weight - self.discrim_min_weight)
+            quality_protected = quality_norm.ge(self.discrim_quality_protect_ratio)
+            incorrect_ready = self.gda_epoch >= self.discrim_incorrect_start_epoch
 
             positive_weights = torch.ones_like(sample_signal)
-            hard_mask = sample_signal.gt(k) & sample_signal.le(gamma_k)
-            incorrect_mask = sample_signal.gt(gamma_k)
+            hard_mask = sample_signal.gt(k)
+            incorrect_mask = torch.zeros_like(hard_mask)
+            if incorrect_ready:
+                incorrect_mask = sample_signal.gt(gamma_k) & ~quality_protected
+                hard_mask = hard_mask & ~incorrect_mask
             positive_weights = torch.where(hard_mask, positive_weights.new_full((), hard_weight), positive_weights)
             positive_weights = torch.where(
                 incorrect_mask,
@@ -610,8 +665,9 @@ class v8DetectionLoss:
                 positive_weights,
             )
             positive_weights = positive_weights / positive_weights.mean().clamp_min(self.discrim_eps)
+            lower = min(self.discrim_min_weight, self.discrim_incorrect_weight)
             upper = max(self.discrim_hard_weight, 1.0)
-            positive_weights = positive_weights.clamp_(self.discrim_min_weight, upper)
+            positive_weights = positive_weights.clamp_(lower, upper)
 
             weights = torch.ones_like(fg_mask, dtype=target_scores.dtype)
             weights[fg_mask] = positive_weights.to(dtype=weights.dtype)
@@ -833,6 +889,7 @@ class v8DetectionLoss:
                 target_scores,
                 cls_loss,
                 fg_mask,
+                stride_tensor,
             )
             if self.discrim_enabled and fg_mask.sum()
             else None

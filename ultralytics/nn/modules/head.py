@@ -338,15 +338,6 @@ class DetectDiscrimLoss(Detect):
     def __init__(
         self,
         nc: int = 80,
-        ema_momentum: float = 0.9,
-        warmup_epochs: int = 3,
-        gamma_max: float = 1.7,
-        gamma_p: float = 0.08,
-        gamma_q: float = 60.0,
-        min_weight: float = 0.35,
-        hard_weight: float = 1.35,
-        incorrect_weight: float = 0.35,
-        cls_signal_gain: float = 0.25,
         reg_max=16,
         end2end=False,
         ch: tuple = (),
@@ -354,19 +345,19 @@ class DetectDiscrimLoss(Detect):
         """Initialize a standard Detect head with DiscrimLoss training metadata."""
         super().__init__(nc=nc, reg_max=reg_max, end2end=end2end, ch=ch)
         self.discrim_enabled = True
-        self.discrim_ema_momentum = float(ema_momentum)
-        self.discrim_warmup_epochs = int(warmup_epochs)
-        self.discrim_gamma_max = float(gamma_max)
-        self.discrim_gamma_p = float(gamma_p)
-        self.discrim_gamma_q = float(gamma_q)
-        self.discrim_min_weight = float(min_weight)
-        self.discrim_hard_weight = float(hard_weight)
-        self.discrim_incorrect_weight = float(incorrect_weight)
-        self.discrim_cls_signal_gain = float(cls_signal_gain)
+        self.discrim_ema_momentum = 0.95
+        self.discrim_warmup_epochs = 10
+        self.discrim_gamma_max = 2.3
+        self.discrim_gamma_p = 0.06
+        self.discrim_gamma_q = 90.0
+        self.discrim_min_weight = 0.70
+        self.discrim_hard_weight = 1.20
+        self.discrim_incorrect_weight = 0.60
+        self.discrim_cls_signal_gain = 0.08
         self.discrim_es_type = "linear"
         self.discrim_apply_box = True
-        self.discrim_apply_cls = True
-        self.discrim_apply_dfl = True
+        self.discrim_apply_cls = False
+        self.discrim_apply_dfl = False
 
 
 class DetectTLoss(Detect):
