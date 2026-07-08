@@ -593,14 +593,15 @@ class v8DetectionLoss:
             cls_signal = (cls_loss.detach() * cls_pos_mask).sum(-1)[fg_mask]
             raw_signal = (loc_signal + self.discrim_cls_signal_gain * cls_signal).clamp_min(0.0)
 
-            anchor_stride = stride_tensor.view(-1).to(device=fg_mask.device)
+            anchor_stride = stride_tensor.view(-1).to(device=fg_mask.device, dtype=raw_signal.dtype)
             level_ids = torch.zeros_like(anchor_stride, dtype=torch.long)
-            for level_idx, stride_value in enumerate(self.stride.to(device=anchor_stride.device)):
+            stride_values = self.stride.to(device=anchor_stride.device, dtype=anchor_stride.dtype)
+            for level_idx, stride_value in enumerate(stride_values):
                 level_ids[torch.isclose(anchor_stride, stride_value, rtol=0.0, atol=1e-4)] = level_idx
             positive_level_ids = level_ids.unsqueeze(0).expand_as(fg_mask)[fg_mask]
 
             target_quality = target_scores.sum(-1).detach()[fg_mask].clamp_min(0.0)
-            quality_ref = torch.full_like(target_quality, target_quality.mean().clamp_min(self.discrim_eps))
+            quality_ref = torch.ones_like(target_quality) * target_quality.mean().clamp_min(self.discrim_eps)
             if self.discrim_levelwise:
                 for level_idx in range(len(self.stride)):
                     level_mask = positive_level_ids.eq(level_idx)
