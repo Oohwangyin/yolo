@@ -434,6 +434,9 @@ class v8DetectionLoss:
         self.quality_small_thr = float(getattr(m, "quality_small_thr", 32.0))
         self.quality_small_gain = float(getattr(m, "quality_small_gain", 1.5))
         self.quality_levels = int(getattr(m, "quality_levels", 0))
+        self.quality_target_power = max(float(getattr(m, "quality_target_power", 1.0)), 1e-3)
+        self.quality_weak_classes = tuple(int(i) for i in getattr(m, "quality_weak_classes", ()))
+        self.quality_weak_loss_gain = max(float(getattr(m, "quality_weak_loss_gain", 1.0)), 0.0)
         self.box_loss_type = str(getattr(m, "box_loss_type", "ciou"))
         self.inner_mpdiou_ratio = float(getattr(m, "inner_mpdiou_ratio", 0.7))
         self.dsla_enabled = bool(getattr(m, "dsla_enabled", False))
@@ -1017,6 +1020,8 @@ class v8DetectionLoss:
         quality_target = bbox_iou(
             pred_bboxes[quality_mask], target_bboxes[quality_mask], xywh=False
         ).clamp_(0.0, 1.0).detach()
+        if self.quality_target_power != 1.0:
+            quality_target = quality_target.pow(self.quality_target_power)
         quality_logits = pred_quality[quality_mask]
         score_weight = target_scores.sum(-1, keepdim=True)[quality_mask].detach()
 
@@ -1025,6 +1030,16 @@ class v8DetectionLoss:
         obj_size = torch.sqrt((wh[..., 0] * wh[..., 1]).clamp_min(1.0))
         small_weight = 1.0 + self.quality_small_gain * (1.0 - obj_size / self.quality_small_thr).clamp(0.0, 1.0)
         quality_weight = score_weight * small_weight.unsqueeze(-1)
+        if self.quality_weak_classes and self.quality_weak_loss_gain != 1.0:
+            assigned_cls = target_scores[quality_mask].argmax(-1)
+            weak_mask = torch.zeros_like(assigned_cls, dtype=torch.bool)
+            for class_id in self.quality_weak_classes:
+                if 0 <= class_id < self.nc:
+                    weak_mask |= assigned_cls.eq(class_id)
+            if weak_mask.any():
+                class_weight = torch.ones_like(score_weight)
+                class_weight[weak_mask] = self.quality_weak_loss_gain
+                quality_weight = quality_weight * class_weight
 
         loss = F.binary_cross_entropy_with_logits(quality_logits, quality_target, reduction="none")
         return (loss * quality_weight).sum() / quality_weight.sum().clamp_min(1.0)

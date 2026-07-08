@@ -29,6 +29,7 @@ __all__ = (
     "DetectGDA",
     "DetectTLoss",
     "DetectSQ",
+    "DetectQCV2",
     "DetectSAB",
     "Pose",
     "RTDETRDecoder",
@@ -531,6 +532,77 @@ class DetectSQ(Detect):
         if self.end2end:
             for q in self.one2one_cv4:
                 q[-1].bias.data.zero_()
+
+
+class DetectQCV2(DetectSQ):
+    """YOLO Detect head with scale-aware and weak-class-protected quality calibration."""
+
+    def __init__(
+        self,
+        nc: int = 80,
+        quality_loss_gain: float = 0.20,
+        quality_small_thr: float = 32.0,
+        quality_small_gain: float = 1.2,
+        quality_levels: int = 2,
+        quality_alpha_p2: float = 0.30,
+        quality_alpha_p3: float = 0.50,
+        quality_alpha_p4: float = 0.00,
+        quality_target_power: float = 0.50,
+        quality_weak_alpha_factor: float = 0.60,
+        quality_weak_loss_gain: float = 0.75,
+        quality_weak_classes: tuple | list = (1, 2, 6, 7),
+        reg_max=16,
+        end2end=False,
+        ch: tuple = (),
+    ):
+        """Initialize QCv2 with relaxed quality targets and mild score calibration."""
+        super().__init__(
+            nc=nc,
+            quality_loss_gain=quality_loss_gain,
+            quality_small_thr=quality_small_thr,
+            quality_small_gain=quality_small_gain,
+            quality_levels=quality_levels,
+            reg_max=reg_max,
+            end2end=end2end,
+            ch=ch,
+        )
+        self.quality_alpha = (
+            max(float(quality_alpha_p2), 0.0),
+            max(float(quality_alpha_p3), 0.0),
+            max(float(quality_alpha_p4), 0.0),
+        )
+        self.quality_target_power = max(float(quality_target_power), 1e-3)
+        self.quality_weak_alpha_factor = min(max(float(quality_weak_alpha_factor), 0.0), 1.0)
+        self.quality_weak_loss_gain = max(float(quality_weak_loss_gain), 0.0)
+        self.quality_weak_classes = tuple(int(i) for i in quality_weak_classes)
+
+    def _quality_alpha_map(self, feats: list[torch.Tensor], device: torch.device, dtype: torch.dtype) -> torch.Tensor:
+        """Create a flattened per-level calibration exponent map."""
+        alphas = []
+        for i, feat in enumerate(feats):
+            alpha = self.quality_alpha[i] if i < len(self.quality_alpha) else self.quality_alpha[-1]
+            alphas.append(torch.full((feat.shape[2] * feat.shape[3],), alpha, dtype=dtype, device=device))
+        return torch.cat(alphas, 0).view(1, 1, -1)
+
+    def _weak_class_factor(self, nc: int, device: torch.device, dtype: torch.dtype) -> torch.Tensor:
+        """Create a class-wise factor that protects weak classes from over-calibration."""
+        factor = torch.ones((1, nc, 1), dtype=dtype, device=device)
+        valid_ids = [i for i in self.quality_weak_classes if 0 <= i < nc]
+        if valid_ids:
+            factor[:, valid_ids, :] = self.quality_weak_alpha_factor
+        return factor
+
+    def _inference(self, x: dict[str, torch.Tensor]) -> torch.Tensor:
+        """Decode boxes and calibrate class scores with scale-aware quality exponents."""
+        dbox = self._get_decode_boxes(x)
+        scores = x["scores"].sigmoid()
+        quality = x.get("quality")
+        if quality is not None:
+            quality = quality.sigmoid().clamp_(1e-6, 1.0)
+            alpha = self._quality_alpha_map(x["feats"], quality.device, quality.dtype)
+            alpha = alpha * self._weak_class_factor(scores.shape[1], scores.device, scores.dtype)
+            scores = scores * quality.pow(alpha)
+        return torch.cat((dbox, scores), 1)
 
 
 class Segment(Detect):
