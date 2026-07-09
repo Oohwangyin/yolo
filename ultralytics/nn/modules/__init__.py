@@ -82,6 +82,7 @@ from .conv import (
     RepConv,
     SpatialAttention,
 )
+from .cenet import CENetBlock
 from .fdconv import FDConv
 from .fafm import FAFM
 from .fem import FEM
@@ -164,6 +165,7 @@ __all__ = (
     "C3x",
     "CBFuse",
     "CBLinear",
+    "CENetBlock",
     "ChannelAttention",
     "Classify",
     "Concat",
