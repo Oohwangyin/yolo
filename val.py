@@ -1,11 +1,18 @@
+import os
 from ultralytics import YOLO
 
-model = YOLO("runs/VisDrone/yolov8s-PRN/train/weights/best.pt")
+os.environ["OMP_NUM_THREADS"] = "8"
+
+model = YOLO("runs/VisDrone/yolov8s-FAFM-Lite-CENet/train/weights/best.pt")
 
 model.val(
     data="VisDrone.yaml",
-    split="test",
-    batch=16,
+    split="val",
+    batch=1,
     imgsz=640,
-    project="VisDrone/yolov8s-PRN",
+    conf=0.001,
+    iou=0.7,
+    max_det=300,
+    project="VisDrone/yolov8s-FAFM-Lite-CENet",
+    exist_ok=True,
 )

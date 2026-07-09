@@ -76,7 +76,7 @@ from .conv import (
     RepConv,
     SpatialAttention,
 )
-from .cenet import CENetBlock
+from .cenet import CENetBlock, CENetLiteBlock
 from .fafm import FAFM
 from .head import (
     OBB,
@@ -144,6 +144,7 @@ __all__ = (
     "CBFuse",
     "CBLinear",
     "CENetBlock",
+    "CENetLiteBlock",
     "ChannelAttention",
     "Classify",
     "Concat",
