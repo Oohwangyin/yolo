@@ -30,9 +30,7 @@ from ultralytics.nn.modules import (
     ADown,
     Bottleneck,
     BottleneckCSP,
-    CARAFE,
     C2f,
-    C2fFDConv,
     C2fAttn,
     C2fCIB,
     C2fPSA,
@@ -48,21 +46,9 @@ from ultralytics.nn.modules import (
     Conv2,
     ConvTranspose,
     Detect,
-    DetectBAB,
-    DetectDiscrimLoss,
-    DetectDSLA,
-    DetectGDA,
-    DetectIMPD,
-    DetectQCV2,
-    DetectSQ,
-    DetectSAB,
-    DetectTLoss,
     DWConv,
     DWConvTranspose2d,
-    DSAM,
     FAFM,
-    FDConv,
-    FEM,
     Focus,
     GhostBottleneck,
     GhostConv,
@@ -71,8 +57,6 @@ from ultralytics.nn.modules import (
     ImagePoolingAttn,
     Index,
     LRPCHead,
-    MGAM,
-    MCGAM,
     Pose,
     Pose26,
     RepC3,
@@ -80,16 +64,11 @@ from ultralytics.nn.modules import (
     RepNCSPELAN4,
     RepVGGDW,
     ResNetLayer,
-    RFAConv,
     RTDETRDecoder,
     SCDown,
-    SHAB,
-    SHDCBlock,
-    SHDCLite,
     Segment,
     Segment26,
     SemanticSegment,
-    SeRankLite,
     TorchVision,
     WorldDetect,
     YOLOEDetect,
@@ -1699,13 +1678,8 @@ def parse_model(d, ch, verbose=True):
         {
             Classify,
             Conv,
-            FDConv,
-            FEM,
-            RFAConv,
             ConvTranspose,
             GhostConv,
-            MGAM,
-            MCGAM,
             Bottleneck,
             GhostBottleneck,
             SPP,
@@ -1718,7 +1692,6 @@ def parse_model(d, ch, verbose=True):
             C1,
             C2,
             C2f,
-            C2fFDConv,
             C3k2,
             RepNCSPELAN4,
             ELAN1,
@@ -1729,19 +1702,15 @@ def parse_model(d, ch, verbose=True):
             C3,
             C3TR,
             C3Ghost,
-            CENetBlock,
             torch.nn.ConvTranspose2d,
             DWConvTranspose2d,
             C3x,
             RepC3,
             PSA,
             SCDown,
-            SHAB,
-            SHDCBlock,
-            SHDCLite,
-            SeRankLite,
             C2fCIB,
             A2C2f,
+            CENetBlock,
         }
     )
     repeat_modules = frozenset(  # modules with 'repeat' arguments
@@ -1750,7 +1719,6 @@ def parse_model(d, ch, verbose=True):
             C1,
             C2,
             C2f,
-            C2fFDConv,
             C3k2,
             C2fAttn,
             C3,
@@ -1758,7 +1726,6 @@ def parse_model(d, ch, verbose=True):
             C3Ghost,
             C3x,
             RepC3,
-            SHAB,
             C2fPSA,
             C2fCIB,
             C2PSA,
@@ -1814,14 +1781,6 @@ def parse_model(d, ch, verbose=True):
             args = [ch[f]]
         elif m is Concat:
             c2 = sum(ch[x] for x in f)
-        elif m is CARAFE:
-            c2 = ch[f]
-            args = [c2, *args]
-        elif m is DSAM:
-            if not isinstance(f, list) or len(f) != 2:
-                raise ValueError("DSAM expects two input layers: [low_level_feature, high_level_feature].")
-            c2 = ch[f[0]]
-            args = [c2, ch[f[1]], *args]
         elif m is FAFM:
             if not isinstance(f, list) or len(f) != 2:
                 raise ValueError("FAFM expects two input layers: [low_level_feature, high_level_feature].")
@@ -1831,15 +1790,6 @@ def parse_model(d, ch, verbose=True):
         elif m in frozenset(
             {
                 Detect,
-                DetectBAB,
-                DetectDiscrimLoss,
-                DetectDSLA,
-                DetectGDA,
-                DetectIMPD,
-                DetectQCV2,
-                DetectSQ,
-                DetectSAB,
-                DetectTLoss,
                 WorldDetect,
                 YOLOEDetect,
                 Segment,
@@ -1855,27 +1805,7 @@ def parse_model(d, ch, verbose=True):
             args.extend([reg_max, end2end, [ch[x] for x in f]])
             if m is Segment or m is YOLOESegment or m is Segment26 or m is YOLOESegment26:
                 args[2] = make_divisible(min(args[2], max_channels) * width, 8)
-            if m in {
-                Detect,
-                DetectBAB,
-                DetectDiscrimLoss,
-                DetectDSLA,
-                DetectGDA,
-                DetectIMPD,
-                DetectQCV2,
-                DetectSQ,
-                DetectSAB,
-                DetectTLoss,
-                YOLOEDetect,
-                Segment,
-                Segment26,
-                YOLOESegment,
-                YOLOESegment26,
-                Pose,
-                Pose26,
-                OBB,
-                OBB26,
-            }:
+            if m in {Detect, YOLOEDetect, Segment, Segment26, YOLOESegment, YOLOESegment26, Pose, Pose26, OBB, OBB26}:
                 m.legacy = legacy
         elif m is SemanticSegment:
             args.append([ch[x] for x in f])  # nc, ch tuple

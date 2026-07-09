@@ -3,8 +3,6 @@
 
 from __future__ import annotations
 
-from typing import Optional
-
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -12,7 +10,6 @@ import torch.nn.functional as F
 from ultralytics.utils.torch_utils import fuse_conv_and_bn
 
 from .conv import Conv, DWConv, GhostConv, LightConv, RepConv, autopad
-from .fdconv import FDConv
 from .transformer import TransformerBlock
 
 __all__ = (
@@ -34,9 +31,7 @@ __all__ = (
     "BNContrastiveHead",
     "Bottleneck",
     "BottleneckCSP",
-    "CARAFE",
     "C2f",
-    "C2fFDConv",
     "C2fAttn",
     "C2fCIB",
     "C2fPSA",
@@ -46,20 +41,16 @@ __all__ = (
     "CBFuse",
     "CBLinear",
     "ContrastiveHead",
-    "DSAM",
     "GhostBottleneck",
     "HGBlock",
     "HGStem",
     "ImagePoolingAttn",
-    "MGAM",
-    "MCGAM",
     "Proto",
     "RepC3",
     "RepNCSPELAN4",
     "RepVGGDW",
     "ResNetLayer",
     "SCDown",
-    "SHAB",
     "TorchVision",
 )
 
@@ -109,61 +100,6 @@ class Proto(nn.Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """Perform a forward pass through layers using an upsampled input image."""
         return self.cv3(self.cv2(self.upsample(self.cv1(x))))
-
-
-class CARAFE(nn.Module):
-    """Content-aware reassembly of features for learnable upsampling."""
-
-    def __init__(
-        self,
-        c1: int,
-        scale_factor: int = 2,
-        kernel_size: int = 5,
-        encoder_kernel: int = 3,
-        c_mid: int = 64,
-    ):
-        """Initialize CARAFE.
-
-        Args:
-            c1 (int): Input and output channels.
-            scale_factor (int): Upsampling factor.
-            kernel_size (int): Reassembly kernel size.
-            encoder_kernel (int): Kernel size used to predict reassembly weights.
-            c_mid (int): Compressed channels for the kernel prediction branch.
-        """
-        super().__init__()
-        if scale_factor < 1:
-            raise ValueError("CARAFE scale_factor must be >= 1.")
-        if kernel_size % 2 == 0 or encoder_kernel % 2 == 0:
-            raise ValueError("CARAFE kernel_size and encoder_kernel must be odd.")
-
-        self.scale_factor = int(scale_factor)
-        self.kernel_size = int(kernel_size)
-        c_mid = max(1, min(int(c_mid), c1))
-        self.compress = Conv(c1, c_mid, 1, 1)
-        self.encoder = nn.Conv2d(
-            c_mid,
-            (self.scale_factor * self.kernel_size) ** 2,
-            encoder_kernel,
-            stride=1,
-            padding=encoder_kernel // 2,
-        )
-        self.pixel_shuffle = nn.PixelShuffle(self.scale_factor)
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """Upsample features with content-aware reassembly kernels."""
-        b, c, h, w = x.shape
-        h_out, w_out = h * self.scale_factor, w * self.scale_factor
-
-        mask = self.encoder(self.compress(x))
-        mask = self.pixel_shuffle(mask).reshape(b, self.kernel_size * self.kernel_size, h_out, w_out)
-        mask = F.softmax(mask, dim=1)
-
-        x_unfold = F.unfold(x, kernel_size=self.kernel_size, padding=self.kernel_size // 2)
-        x_unfold = x_unfold.reshape(b, c * self.kernel_size * self.kernel_size, h, w)
-        x_unfold = F.interpolate(x_unfold, scale_factor=self.scale_factor, mode="nearest")
-        x_unfold = x_unfold.reshape(b, c, self.kernel_size * self.kernel_size, h_out, w_out)
-        return (x_unfold * mask.unsqueeze(1)).sum(dim=2)
 
 
 class HGStem(nn.Module):
@@ -383,108 +319,6 @@ class C2f(nn.Module):
         return self.cv2(torch.cat(y, 1))
 
 
-class _SHABConvBN(nn.Sequential):
-    """Convolution followed by batch normalization for SHAB internals."""
-
-    def __init__(
-        self,
-        c1: int,
-        c2: int,
-        k: int = 1,
-        s: int = 1,
-        p: int = 0,
-        d: int = 1,
-        g: int = 1,
-        bn_weight_init: float = 1.0,
-    ):
-        """Initialize convolution and batch normalization layers."""
-        super().__init__()
-        self.add_module("conv", nn.Conv2d(c1, c2, k, s, p, d, g, bias=False))
-        self.add_module("bn", nn.BatchNorm2d(c2))
-        nn.init.constant_(self.bn.weight, bn_weight_init)
-        nn.init.constant_(self.bn.bias, 0)
-
-
-class _SHABResidual(nn.Module):
-    """Residual wrapper used by SHAB blocks."""
-
-    def __init__(self, fn: nn.Module):
-        """Initialize the wrapped residual function."""
-        super().__init__()
-        self.fn = fn
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """Apply residual addition."""
-        return self.fn(x) + x
-
-
-class _SHABGroupNorm(nn.GroupNorm):
-    """Group normalization with a single group for SHSA."""
-
-    def __init__(self, num_channels: int, **kwargs):
-        """Initialize single-group normalization."""
-        super().__init__(1, num_channels, **kwargs)
-
-
-class SHSA(nn.Module):
-    """Single-head self-attention used inside SHAB."""
-
-    def __init__(self, dim: int, qk_dim: int = 16, pdim: int = 64):
-        """Initialize SHSA with partial-channel attention."""
-        super().__init__()
-        self.dim = dim
-        self.pdim = min(pdim, dim)
-        self.qk_dim = min(qk_dim, self.pdim)
-        self.scale = self.qk_dim**-0.5
-
-        self.pre_norm = _SHABGroupNorm(self.pdim)
-        self.qkv = _SHABConvBN(self.pdim, self.qk_dim * 2 + self.pdim)
-        self.proj = nn.Sequential(nn.SiLU(), _SHABConvBN(dim, dim, bn_weight_init=0))
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """Apply self-attention to a channel subset and keep the remainder as identity."""
-        b, _, h, w = x.shape
-        x1, x2 = torch.split(x, [self.pdim, self.dim - self.pdim], dim=1)
-        qkv = self.qkv(self.pre_norm(x1))
-        q, k, v = qkv.split([self.qk_dim, self.qk_dim, self.pdim], dim=1)
-        q, k, v = q.flatten(2), k.flatten(2), v.flatten(2)
-
-        attn = (q.transpose(-2, -1) @ k) * self.scale
-        attn = attn.softmax(dim=-1)
-        x1 = (v @ attn.transpose(-2, -1)).reshape(b, self.pdim, h, w)
-        return self.proj(torch.cat([x1, x2], dim=1))
-
-
-class SHSABlock(nn.Module):
-    """Spatial hierarchical single-head self-attention block."""
-
-    def __init__(self, dim: int, qk_dim: int = 16, pdim: int = 64):
-        """Initialize depthwise convolution, SHSA, and feed-forward branches."""
-        super().__init__()
-        self.conv = _SHABResidual(_SHABConvBN(dim, dim, 3, 1, 1, g=dim, bn_weight_init=0))
-        self.mixer = _SHABResidual(SHSA(dim, qk_dim, pdim))
-        self.ffn = _SHABResidual(
-            nn.Sequential(
-                _SHABConvBN(dim, int(dim * 2)),
-                nn.SiLU(),
-                _SHABConvBN(int(dim * 2), dim, bn_weight_init=0),
-            )
-        )
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """Forward pass through SHSA block."""
-        return self.ffn(self.mixer(self.conv(x)))
-
-
-class SHAB(C2f):
-    """C2f variant that replaces bottlenecks with lightweight SHSA blocks."""
-
-    def __init__(self, c1: int, c2: int, n: int = 1, shortcut: bool = False, g: int = 1, e: float = 0.5):
-        """Initialize SHAB with the same YAML signature as C2f."""
-        super().__init__(c1, c2, n, shortcut, g, e)
-        self.m = nn.ModuleList(SHSABlock(self.c) for _ in range(n))
-
-
 class C3(nn.Module):
     """CSP Bottleneck with 3 convolutions."""
 
@@ -645,70 +479,6 @@ class Bottleneck(nn.Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """Apply bottleneck with optional shortcut connection."""
         return x + self.cv2(self.cv1(x)) if self.add else self.cv2(self.cv1(x))
-
-
-class BottleneckFDConv(nn.Module):
-    """Bottleneck with FDConv on the main spatial transform."""
-
-    def __init__(
-        self,
-        c1: int,
-        c2: int,
-        shortcut: bool = True,
-        g: int = 1,
-        k: tuple[int, int] = (3, 3),
-        e: float = 0.5,
-        kernel_num: int = 4,
-        use_fbm: bool = True,
-    ):
-        """Initialize a bottleneck that keeps the first conv standard and uses FDConv for the second conv."""
-        super().__init__()
-        c_ = int(c2 * e)
-        self.cv1 = Conv(c1, c_, k[0], 1)
-        self.cv2 = FDConv(c_, c2, k[1], 1, g=g, kernel_num=kernel_num, use_fbm=use_fbm)
-        self.add = shortcut and c1 == c2
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """Apply FDConv bottleneck with optional shortcut connection."""
-        return x + self.cv2(self.cv1(x)) if self.add else self.cv2(self.cv1(x))
-
-
-class C2fFDConv(nn.Module):
-    """C2f block with FDConv bottlenecks for backbone feature extraction."""
-
-    def __init__(
-        self,
-        c1: int,
-        c2: int,
-        n: int = 1,
-        shortcut: bool = False,
-        g: int = 1,
-        e: float = 0.5,
-        kernel_num: int = 4,
-        use_fbm: bool = True,
-    ):
-        """Initialize a C2f block whose internal bottleneck spatial conv uses FDConv."""
-        super().__init__()
-        self.c = int(c2 * e)
-        self.cv1 = Conv(c1, 2 * self.c, 1, 1)
-        self.cv2 = Conv((2 + n) * self.c, c2, 1)
-        self.m = nn.ModuleList(
-            BottleneckFDConv(self.c, self.c, shortcut, g, k=(3, 3), e=1.0, kernel_num=kernel_num, use_fbm=use_fbm)
-            for _ in range(n)
-        )
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """Forward pass through C2fFDConv."""
-        y = list(self.cv1(x).chunk(2, 1))
-        y.extend(m(y[-1]) for m in self.m)
-        return self.cv2(torch.cat(y, 1))
-
-    def forward_split(self, x: torch.Tensor) -> torch.Tensor:
-        """Forward pass using split() instead of chunk()."""
-        y = self.cv1(x).split((self.c, self.c), 1)
-        y = [y[0], y[1]]
-        y.extend(m(y[-1]) for m in self.m)
-        return self.cv2(torch.cat(y, 1))
 
 
 class BottleneckCSP(nn.Module):
@@ -1268,44 +1038,6 @@ class CBFuse(nn.Module):
         return torch.sum(torch.stack(res + xs[-1:]), dim=0)
 
 
-class DSAM(nn.Module):
-    """Dual-stream attention module that uses high-level context to enhance a low-level feature map."""
-
-    def __init__(self, c_low, c_high, c_out=None, dilations=(1, 3, 5, 7), shortcut=True):
-        """Initialize DSAM.
-
-        Args:
-            c_low (int): Channels of the low-level feature map to enhance.
-            c_high (int): Channels of the high-level feature map used to generate attention.
-            c_out (int, optional): Output channels. Defaults to c_low.
-            dilations (tuple[int]): Dilation rates for each dual-stream branch.
-            shortcut (bool): Add the enhanced feature back to the low-level input when channels match.
-        """
-        super().__init__()
-        c_out = c_low if c_out is None else c_out
-        self.shortcut = shortcut and c_out == c_low
-        self.attn = nn.Sequential(Conv(c_high, c_out, 1), nn.Conv2d(c_out, 1, 1))
-        self.fg_convs = nn.ModuleList(Conv(c_low, c_out, 1 if d == 1 else 3, d=d) for d in dilations)
-        self.bg_convs = nn.ModuleList(Conv(c_low, c_out, 1 if d == 1 else 3, d=d) for d in dilations)
-        self.out = Conv(c_out * len(dilations) * 2, c_out, 3)
-
-    @staticmethod
-    def _multi_scale_conv(x, branches):
-        """Apply parallel convolutions and concatenate their outputs."""
-        return torch.cat([branch(x) for branch in branches], 1)
-
-    def forward(self, x):
-        """Enhance low-level features with foreground/background attention from high-level features."""
-        low, high = x
-        attn = torch.sigmoid(
-            F.interpolate(self.attn(high), size=low.shape[2:], mode="bilinear", align_corners=False)
-        )
-        fg = self._multi_scale_conv(low * attn, self.fg_convs)
-        bg = self._multi_scale_conv(low * (1 - attn), self.bg_convs)
-        out = self.out(torch.cat((fg, bg), 1))
-        return out + low if self.shortcut else out
-
-
 class C3f(nn.Module):
     """Faster Implementation of CSP Bottleneck with 3 convolutions."""
 
@@ -1332,154 +1064,6 @@ class C3f(nn.Module):
         y = [self.cv2(x), self.cv1(x)]
         y.extend(m(y[-1]) for m in self.m)
         return self.cv3(torch.cat(y, 1))
-
-
-class MGAM(nn.Module):
-    """Multiscale Gaussian attention adapted for YOLO feature maps."""
-
-    def __init__(
-        self,
-        c1: int,
-        c2: int,
-        kernels: tuple[int, ...] | list[int] | int = (1, 3, 5, 7),
-        use_dw: bool = True,
-        channel_sigma: float = 0.5,
-        spatial_sigma: float = 0.5,
-        eps: float = 1e-6,
-        gamma_init: Optional[float] = None,
-    ):
-        """Initialize MGAM."""
-        super().__init__()
-        kernels = (kernels,) if isinstance(kernels, int) else tuple(kernels)
-        self.eps = eps
-        self.channel_sigma = channel_sigma
-        self.spatial_sigma = spatial_sigma
-        self.gamma = None if gamma_init is None else nn.Parameter(torch.tensor(float(gamma_init)))
-        self.proj = Conv(c1, c2, 1, 1) if c1 != c2 else nn.Identity()
-        self.branches = nn.ModuleList(
-            Conv(c2, c2, k, 1) if (k == 1 or not use_dw) else DWConv(c2, c2, k, 1) for k in kernels
-        )
-        self.fuse = Conv(c2, c2, 1, 1)
-        self.avg_pool = nn.AdaptiveAvgPool2d(1)
-        self.max_pool = nn.AdaptiveMaxPool2d(1)
-
-    def _channel_gaussian(self, x: torch.Tensor) -> torch.Tensor:
-        """Apply Gaussian attention along channels around the strongest response."""
-        b, c, _, _ = x.shape
-        score = self.avg_pool(x) + self.max_pool(x)
-        center = score.flatten(1).argmax(dim=1).to(dtype=x.dtype).view(b, 1, 1, 1)
-        pos = torch.arange(c, device=x.device, dtype=x.dtype).view(1, c, 1, 1)
-        sigma = max(float(c) * self.channel_sigma, 1.0)
-        weight = torch.exp(-0.5 * ((pos - center) / sigma).pow(2))
-        weight = weight / weight.amax(dim=1, keepdim=True).clamp_min(self.eps)
-        return x * weight
-
-    def _spatial_gaussian(self, x: torch.Tensor) -> torch.Tensor:
-        """Apply Gaussian attention in space around the strongest response."""
-        b, _, h, w = x.shape
-        score = x.mean(dim=1, keepdim=True) + x.amax(dim=1, keepdim=True)
-        index = score.flatten(2).argmax(dim=2).to(dtype=x.dtype)
-        cy = (index // w).view(b, 1, 1, 1)
-        cx = (index % w).view(b, 1, 1, 1)
-        yy = torch.arange(h, device=x.device, dtype=x.dtype).view(1, 1, h, 1)
-        xx = torch.arange(w, device=x.device, dtype=x.dtype).view(1, 1, 1, w)
-        sigma_y = max(float(h) * self.spatial_sigma, 1.0)
-        sigma_x = max(float(w) * self.spatial_sigma, 1.0)
-        weight = torch.exp(-0.5 * (((yy - cy) / sigma_y).pow(2) + ((xx - cx) / sigma_x).pow(2)))
-        weight = weight / weight.amax(dim=(2, 3), keepdim=True).clamp_min(self.eps)
-        return x * weight
-
-    def _heat_map(self, x: torch.Tensor) -> torch.Tensor:
-        """Compute a normalized single-channel heat map."""
-        heat = x.mean(dim=1, keepdim=True)
-        heat_min = heat.amin(dim=(2, 3), keepdim=True)
-        heat_max = heat.amax(dim=(2, 3), keepdim=True)
-        return (heat - heat_min) / (heat_max - heat_min).clamp_min(self.eps)
-
-    def _branch_weight(self, x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
-        """Measure branch response difference from the base feature heat map."""
-        return (self._heat_map(x) - self._heat_map(y)).abs().mean(dim=(2, 3), keepdim=True) + self.eps
-
-    @staticmethod
-    def _weighted_sum(features: list[torch.Tensor], weights: list[torch.Tensor]) -> torch.Tensor:
-        """Fuse branch features with per-image dynamic weights."""
-        weight = torch.stack(weights, dim=1)
-        weight = weight / weight.sum(dim=1, keepdim=True)
-        return (torch.stack(features, dim=1) * weight).sum(dim=1)
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """Enhance a YOLO feature map with multiscale Gaussian attention."""
-        x = self.proj(x)
-        channel_features, channel_weights = [], []
-        spatial_features, spatial_weights = [], []
-        for branch in self.branches:
-            feat = branch(x)
-            channel_feat = self._channel_gaussian(feat)
-            spatial_feat = self._spatial_gaussian(feat)
-            channel_features.append(channel_feat)
-            spatial_features.append(spatial_feat)
-            channel_weights.append(self._branch_weight(x, channel_feat))
-            spatial_weights.append(self._branch_weight(x, spatial_feat))
-        y = self._weighted_sum(channel_features, channel_weights) + self._weighted_sum(spatial_features, spatial_weights)
-        y = self.fuse(y)
-        return x + y if self.gamma is None else x + self.gamma * y
-
-
-class MCGAM(MGAM):
-    """Multi-center MGAM with top-k spatial Gaussian attention."""
-
-    def __init__(
-        self,
-        c1: int,
-        c2: int,
-        kernels: tuple[int, ...] | list[int] | int = (1, 3, 5, 7),
-        use_dw: bool = True,
-        channel_sigma: float = 0.5,
-        spatial_sigma: float = 0.5,
-        eps: float = 1e-6,
-        gamma_init: Optional[float] = 0.0,
-        topk: int = 4,
-        nms_kernel: int = 3,
-        spatial_fuse: str = "union",
-    ):
-        """Initialize MCGAM."""
-        super().__init__(c1, c2, kernels, use_dw, channel_sigma, spatial_sigma, eps, gamma_init)
-        self.topk = max(int(topk), 1)
-        self.nms_kernel = max(int(nms_kernel), 1)
-        if self.nms_kernel % 2 == 0:
-            self.nms_kernel += 1
-        if spatial_fuse not in {"union", "sum"}:
-            raise ValueError(f"Unsupported MCGAM spatial_fuse='{spatial_fuse}'")
-        self.spatial_fuse = spatial_fuse
-
-    def _spatial_gaussian(self, x: torch.Tensor) -> torch.Tensor:
-        """Apply top-k multi-center Gaussian attention in space."""
-        b, _, h, w = x.shape
-        score = x.mean(dim=1, keepdim=True) + x.amax(dim=1, keepdim=True)
-        if self.nms_kernel > 1:
-            local_max = F.max_pool2d(score, self.nms_kernel, stride=1, padding=self.nms_kernel // 2)
-            score = score.masked_fill(score < local_max, torch.finfo(score.dtype).min)
-
-        k = min(self.topk, h * w)
-        center_score, center_index = score.flatten(2).topk(k, dim=2)
-        center_score = center_score.squeeze(1)
-        center_index = center_index.squeeze(1)
-
-        cy = (center_index // w).to(dtype=x.dtype).view(b, k, 1, 1)
-        cx = (center_index % w).to(dtype=x.dtype).view(b, k, 1, 1)
-        yy = torch.arange(h, device=x.device, dtype=x.dtype).view(1, 1, h, 1)
-        xx = torch.arange(w, device=x.device, dtype=x.dtype).view(1, 1, 1, w)
-        sigma_y = max(float(h) * self.spatial_sigma, 1.0)
-        sigma_x = max(float(w) * self.spatial_sigma, 1.0)
-        gaussian = torch.exp(-0.5 * (((yy - cy) / sigma_y).pow(2) + ((xx - cx) / sigma_x).pow(2)))
-
-        alpha = center_score.softmax(dim=1).view(b, k, 1, 1)
-        if self.spatial_fuse == "sum":
-            weight = (alpha * gaussian).sum(dim=1, keepdim=True)
-        else:
-            weight = 1.0 - torch.prod((1.0 - alpha * gaussian).clamp(0.0, 1.0), dim=1, keepdim=True)
-        weight = weight / weight.amax(dim=(2, 3), keepdim=True).clamp_min(self.eps)
-        return x * weight
 
 
 class C3k2(C2f):

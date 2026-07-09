@@ -171,55 +171,6 @@ def bbox_iou(
     return iou  # IoU
 
 
-def bbox_inner_mpdiou(
-    box1: torch.Tensor,
-    box2: torch.Tensor,
-    xywh: bool = True,
-    ratio: float = 0.7,
-    mpdiou_hw: torch.Tensor | float | None = None,
-    eps: float = 1e-7,
-) -> torch.Tensor:
-    """Calculate Inner-MPDIoU between aligned bounding boxes."""
-    if xywh:
-        (x1, y1, w1, h1), (x2, y2, w2, h2) = box1.chunk(4, -1), box2.chunk(4, -1)
-        w1_, h1_, w2_, h2_ = w1 / 2, h1 / 2, w2 / 2, h2 / 2
-        b1_x1, b1_x2, b1_y1, b1_y2 = x1 - w1_, x1 + w1_, y1 - h1_, y1 + h1_
-        b2_x1, b2_x2, b2_y1, b2_y2 = x2 - w2_, x2 + w2_, y2 - h2_, y2 + h2_
-    else:
-        b1_x1, b1_y1, b1_x2, b1_y2 = box1.chunk(4, -1)
-        b2_x1, b2_y1, b2_x2, b2_y2 = box2.chunk(4, -1)
-        w1, h1 = b1_x2 - b1_x1, b1_y2 - b1_y1
-        w2, h2 = b2_x2 - b2_x1, b2_y2 - b2_y1
-        x1, y1 = (b1_x1 + b1_x2) / 2, (b1_y1 + b1_y2) / 2
-        x2, y2 = (b2_x1 + b2_x2) / 2, (b2_y1 + b2_y2) / 2
-
-    inner_w1, inner_h1 = w1 * ratio, h1 * ratio
-    inner_w2, inner_h2 = w2 * ratio, h2 * ratio
-    ib1_x1, ib1_x2 = x1 - inner_w1 / 2, x1 + inner_w1 / 2
-    ib1_y1, ib1_y2 = y1 - inner_h1 / 2, y1 + inner_h1 / 2
-    ib2_x1, ib2_x2 = x2 - inner_w2 / 2, x2 + inner_w2 / 2
-    ib2_y1, ib2_y2 = y2 - inner_h2 / 2, y2 + inner_h2 / 2
-
-    inter = (ib1_x2.minimum(ib2_x2) - ib1_x1.maximum(ib2_x1)).clamp_(0) * (
-        ib1_y2.minimum(ib2_y2) - ib1_y1.maximum(ib2_y1)
-    ).clamp_(0)
-    union = inner_w1 * inner_h1 + inner_w2 * inner_h2 - inter + eps
-    inner_iou = inter / union
-
-    d1 = (b2_x1 - b1_x1).pow(2) + (b2_y1 - b1_y1).pow(2)
-    d2 = (b2_x2 - b1_x2).pow(2) + (b2_y2 - b1_y2).pow(2)
-    if mpdiou_hw is None:
-        cw = b1_x2.maximum(b2_x2) - b1_x1.minimum(b2_x1)
-        ch = b1_y2.maximum(b2_y2) - b1_y1.minimum(b2_y1)
-        mpdiou_hw = cw.pow(2) + ch.pow(2)
-    elif not isinstance(mpdiou_hw, torch.Tensor):
-        mpdiou_hw = torch.as_tensor(mpdiou_hw, dtype=box1.dtype, device=box1.device)
-    else:
-        mpdiou_hw = mpdiou_hw.to(device=box1.device, dtype=box1.dtype)
-
-    return inner_iou - d1 / (mpdiou_hw + eps) - d2 / (mpdiou_hw + eps)
-
-
 def mask_iou(mask1: torch.Tensor, mask2: torch.Tensor, eps: float = 1e-7) -> torch.Tensor:
     """Calculate masks IoU.
 

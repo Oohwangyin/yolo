@@ -187,18 +187,11 @@ class DetectionTrainer(BaseTrainer):
         """Return a DetectionValidator for YOLO model validation."""
         model = unwrap_model(self.model)
         has_pgm = any(module.__class__.__name__ == "PGHeadEnhance" for module in model.modules())
-        has_bab = any(getattr(module, "boundary_loss_gain", 0.0) > 0.0 for module in model.modules())
-        has_sacbl = any(getattr(module, "sacbl_loss_gain", 0.0) > 0.0 for module in model.modules())
-        has_quality = any(getattr(module, "quality_loss_gain", 0.0) > 0.0 for module in model.modules())
-        self.loss_names = ("box_loss", "cls_loss", "dfl_loss")
-        if has_pgm:
-            self.loss_names += ("pgm_loss",)
-        if has_bab:
-            self.loss_names += ("bab_loss",)
-        if has_sacbl:
-            self.loss_names += ("sacbl_loss",)
-        if has_quality:
-            self.loss_names += ("quality_loss",)
+        self.loss_names = ("box_loss", "cls_loss", "dfl_loss", "pgm_loss") if has_pgm else (
+            "box_loss",
+            "cls_loss",
+            "dfl_loss",
+        )
         return yolo.detect.DetectionValidator(
             self.test_loader, save_dir=self.save_dir, args=copy(self.args), _callbacks=self.callbacks
         )
