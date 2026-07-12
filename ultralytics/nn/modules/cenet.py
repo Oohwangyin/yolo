@@ -9,7 +9,7 @@ import torch.nn.functional as F
 
 from .conv import Conv, DWConv
 
-__all__ = ("CENetBlock",)
+__all__ = ("CENetBlock", "CENetDSEBBlock", "CENetCFAMBlock")
 
 
 class CENetBlock(nn.Module):
@@ -76,6 +76,84 @@ class CENetBlock(nn.Module):
         edge = self.edge_proj(self._edge_residual(x))
         x = x + self.edge_gain.to(dtype=x.dtype, device=x.device) * edge
 
+        channel_weight = torch.sigmoid(self.channel_attn(x))
+        context = self.context_proj(torch.cat([branch(x) for branch in self.context], 1))
+        out = self.out(context * channel_weight)
+        return out + identity if self.shortcut else out
+
+
+class CENetDSEBBlock(nn.Module):
+    """DSEB-only ablation of :class:`CENetBlock`.
+
+    This block keeps the FEA-style multi-scale edge residual and removes the
+    CFAM-style channel attention and multi-scale context branches. It is meant
+    only for ablation experiments, so the default CENetBlock behavior remains
+    untouched.
+    """
+
+    def __init__(
+        self,
+        c1: int,
+        c2: int | None = None,
+        edge_gain: float = 0.10,
+        shortcut: bool = True,
+    ):
+        """Initialize the DSEB-only ablation block."""
+        super().__init__()
+        c2 = c1 if c2 is None else c2
+        self.shortcut = shortcut and c1 == c2
+        self.edge_gain = nn.Parameter(torch.tensor(float(edge_gain)))
+
+        self.in_proj = Conv(c1, c2, 1, 1) if c1 != c2 else nn.Identity()
+        self.edge_proj = Conv(c2, c2, 3, 1)
+        self.out = Conv(c2, c2, 3, 1)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Enhance a single YOLO neck feature map with edge residuals only."""
+        identity = x
+        x = self.in_proj(x)
+        edge = self.edge_proj(CENetBlock._edge_residual(x))
+        out = self.out(x + self.edge_gain.to(dtype=x.dtype, device=x.device) * edge)
+        return out + identity if self.shortcut else out
+
+
+class CENetCFAMBlock(nn.Module):
+    """CFAM-only ablation of :class:`CENetBlock`.
+
+    This block keeps channel calibration and dilated depthwise context branches,
+    and removes the DSEB-style edge residual. It is meant only for ablation
+    experiments, so the default CENetBlock behavior remains untouched.
+    """
+
+    def __init__(
+        self,
+        c1: int,
+        c2: int | None = None,
+        reduction: int = 4,
+        dilations: tuple[int, ...] = (1, 3, 5),
+        shortcut: bool = True,
+    ):
+        """Initialize the CFAM-only ablation block."""
+        super().__init__()
+        c2 = c1 if c2 is None else c2
+        c_mid = max(c2 // reduction, 16)
+        self.shortcut = shortcut and c1 == c2
+
+        self.in_proj = Conv(c1, c2, 1, 1) if c1 != c2 else nn.Identity()
+        self.channel_attn = nn.Sequential(
+            nn.AdaptiveAvgPool2d(1),
+            nn.Conv2d(c2, c_mid, 1, bias=True),
+            nn.SiLU(inplace=True),
+            nn.Conv2d(c_mid, c2, 1, bias=True),
+        )
+        self.context = nn.ModuleList(DWConv(c2, c2, 3, 1, d=d) for d in dilations)
+        self.context_proj = Conv(c2 * len(dilations), c2, 1, 1)
+        self.out = Conv(c2, c2, 3, 1)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Enhance a single YOLO neck feature map with CFAM-style context only."""
+        identity = x
+        x = self.in_proj(x)
         channel_weight = torch.sigmoid(self.channel_attn(x))
         context = self.context_proj(torch.cat([branch(x) for branch in self.context], 1))
         out = self.out(context * channel_weight)
