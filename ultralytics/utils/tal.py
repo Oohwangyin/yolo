@@ -94,16 +94,63 @@ class TaskAlignedAssigner(nn.Module):
                 torch.zeros_like(pd_scores[..., 0]),
             )
 
+        if self._should_assign_per_image(pd_scores):
+            return self._forward_per_image(pd_scores, pd_bboxes, anc_points, gt_labels, gt_bboxes, mask_gt)
+
         try:
             return self._forward(pd_scores, pd_bboxes, anc_points, gt_labels, gt_bboxes, mask_gt)
         except RuntimeError as e:
             if "out of memory" in str(e).lower():
-                # Move tensors to CPU, compute, then move back to original device
+                if device.type == "cuda":
+                    LOGGER.warning("CUDA OutOfMemoryError in TaskAlignedAssigner, retrying per-image GPU assignment")
+                    torch.cuda.empty_cache()
+                    try:
+                        return self._forward_per_image(pd_scores, pd_bboxes, anc_points, gt_labels, gt_bboxes, mask_gt)
+                    except RuntimeError as gpu_e:
+                        if "out of memory" not in str(gpu_e).lower():
+                            raise
+                        torch.cuda.empty_cache()
+
+                # Move tensors to CPU, compute, then move back to original device as a last resort.
                 LOGGER.warning("CUDA OutOfMemoryError in TaskAlignedAssigner, using CPU")
                 cpu_tensors = [t.cpu() for t in (pd_scores, pd_bboxes, anc_points, gt_labels, gt_bboxes, mask_gt)]
                 result = self._forward(*cpu_tensors)
                 return tuple(t.to(device) for t in result)
             raise
+
+    def _should_assign_per_image(self, pd_scores):
+        """Return True when batched TAL tensors are likely to exceed GPU memory."""
+        if not pd_scores.is_cuda or self.bs <= 1:
+            return False
+        # P2 detection heads on dense datasets can create very large
+        # (batch, max_gt, anchors) tensors. Chunking by image keeps the same
+        # assignment math while reducing peak memory roughly by batch size.
+        estimated_elements = self.bs * self.n_max_boxes * pd_scores.shape[1]
+        return estimated_elements > 30_000_000
+
+    def _forward_per_image(self, pd_scores, pd_bboxes, anc_points, gt_labels, gt_bboxes, mask_gt):
+        """Compute assignment per image on the original device to lower peak memory."""
+        original_bs, original_n_max_boxes = self.bs, self.n_max_boxes
+        outputs = [[] for _ in range(5)]
+
+        try:
+            self.bs = 1
+            self.n_max_boxes = original_n_max_boxes
+            for i in range(original_bs):
+                result = self._forward(
+                    pd_scores[i : i + 1],
+                    pd_bboxes[i : i + 1],
+                    anc_points,
+                    gt_labels[i : i + 1],
+                    gt_bboxes[i : i + 1],
+                    mask_gt[i : i + 1],
+                )
+                for output, item in zip(outputs, result):
+                    output.append(item)
+        finally:
+            self.bs, self.n_max_boxes = original_bs, original_n_max_boxes
+
+        return tuple(torch.cat(output, 0) for output in outputs)
 
     def _forward(self, pd_scores, pd_bboxes, anc_points, gt_labels, gt_bboxes, mask_gt):
         """Compute the task-aligned assignment.
