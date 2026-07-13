@@ -41,13 +41,14 @@ from ultralytics.nn.modules import (
     CBLinear,
     CENetBlock,
     CENetCFAMBlock,
-    CENetDSEBBlock,
     Classify,
     Concat,
     Conv,
     Conv2,
     ConvTranspose,
     Detect,
+    DSEB,
+    DSEBGated,
     DWConv,
     DWConvTranspose2d,
     FAFM,
@@ -1714,7 +1715,8 @@ def parse_model(d, ch, verbose=True):
             A2C2f,
             CENetBlock,
             CENetCFAMBlock,
-            CENetDSEBBlock,
+            DSEB,
+            DSEBGated,
         }
     )
     repeat_modules = frozenset(  # modules with 'repeat' arguments

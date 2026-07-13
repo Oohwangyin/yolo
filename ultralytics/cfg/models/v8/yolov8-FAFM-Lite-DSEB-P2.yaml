@@ -1,8 +1,8 @@
 # Ultralytics AGPL-3.0 License - https://ultralytics.com/license
 
 # YOLOv8 object detection model for DSEB placement ablation.
-# This config keeps FAFM-Lite unchanged, applies CENetDSEBBlock only on the
-# P2/4 detection feature, and leaves the P3/8 feature without DSEB enhancement.
+# This config keeps FAFM-Lite unchanged, applies DSEB only on the P2/4 detection
+# feature, and leaves the P3/8 feature without DSEB enhancement.
 
 # Parameters
 nc: 80 # number of classes
@@ -41,7 +41,7 @@ head:
 
   - [[2, 14], 1, FAFM, [128]] # 15 fuse P3 -> P2
   - [-1, 3, C2f, [128]] # 16-P2/4
-  - [-1, 1, CENetDSEBBlock, [128, 0.10]] # 17 DSEB-only P2/4
+  - [-1, 1, DSEB, [128, 0.10]] # 17 DSEB-only P2/4
 
   # Bottom-up PAN path starts from the enhanced P2 feature.
   - [-1, 1, Conv, [128, 3, 2]]

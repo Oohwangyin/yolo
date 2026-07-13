@@ -1,12 +1,12 @@
 # Ultralytics AGPL-3.0 License - https://ultralytics.com/license
 
-# YOLOv8 object detection model for DSEB ablation.
-# This config keeps FAFM-Lite unchanged and applies DSEB on P2/P3 features to
-# isolate the edge/detail branch.
+# YOLOv8 object detection model with gated DSEB enhancement.
+# This config keeps FAFM-Lite unchanged and applies DSEBGated on P2/P3 features
+# so edge residuals can be selectively enhanced or suppressed.
 
 # Parameters
 nc: 80 # number of classes
-scales: # model compound scaling constants, i.e. 'model=yolov8s-FAFM-Lite-DSEB.yaml' will call yolov8-FAFM-Lite-DSEB.yaml with scale 's'
+scales: # model compound scaling constants, i.e. 'model=yolov8s-FAFM-Lite-DSEB-Gated.yaml' will call yolov8-FAFM-Lite-DSEB-Gated.yaml with scale 's'
   # [depth, width, max_channels]
   n: [0.33, 0.25, 1024]
   s: [0.33, 0.50, 1024]
@@ -28,7 +28,7 @@ backbone:
   - [-1, 3, C2f, [1024, True]] # 8-P5/32
   - [-1, 1, SPPF, [1024, 5]] # 9-P5/32
 
-# YOLOv8.0-FAFM-Lite-DSEB head
+# YOLOv8.0-FAFM-Lite-DSEB-Gated head
 head:
   # P5 -> P4 keeps standard lightweight top-down fusion.
   - [-1, 1, nn.Upsample, [None, 2, "nearest"]]
@@ -41,13 +41,13 @@ head:
 
   - [[2, 14], 1, FAFM, [128]] # 15 fuse P3 -> P2
   - [-1, 3, C2f, [128]] # 16-P2/4
-  - [-1, 1, DSEB, [128, 0.10]] # 17 DSEB-only P2/4
+  - [-1, 1, DSEBGated, [128, 0.10]] # 17 gated DSEB P2/4
 
   # Bottom-up PAN path starts from the enhanced P2 feature.
   - [-1, 1, Conv, [128, 3, 2]]
   - [[-1, 14], 1, Concat, [1]] # cat top-down P3
   - [-1, 3, C2f, [256]] # 20-P3/8
-  - [-1, 1, DSEB, [256, 0.08]] # 21 DSEB-only P3/8
+  - [-1, 1, DSEBGated, [256, 0.08]] # 21 gated DSEB P3/8
 
   - [-1, 1, Conv, [256, 3, 2]]
   - [[-1, 12], 1, Concat, [1]] # cat top-down P4

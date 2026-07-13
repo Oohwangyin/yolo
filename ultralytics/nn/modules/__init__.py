@@ -76,7 +76,7 @@ from .conv import (
     RepConv,
     SpatialAttention,
 )
-from .cenet import CENetBlock, CENetCFAMBlock, CENetDSEBBlock
+from .cenet import CENetBlock, CENetCFAMBlock, DSEB, DSEBGated
 from .fafm import FAFM
 from .head import (
     OBB,
@@ -145,7 +145,6 @@ __all__ = (
     "CBLinear",
     "CENetBlock",
     "CENetCFAMBlock",
-    "CENetDSEBBlock",
     "ChannelAttention",
     "Classify",
     "Concat",
@@ -153,6 +152,8 @@ __all__ = (
     "Conv",
     "Conv2",
     "ConvTranspose",
+    "DSEB",
+    "DSEBGated",
     "DWConv",
     "DWConvTranspose2d",
     "DeformableTransformerDecoder",

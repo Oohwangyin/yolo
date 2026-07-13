@@ -9,7 +9,7 @@ import torch.nn.functional as F
 
 from .conv import Conv, DWConv
 
-__all__ = ("CENetBlock", "CENetDSEBBlock", "CENetCFAMBlock")
+__all__ = ("CENetBlock", "DSEB", "DSEBGated", "CENetCFAMBlock")
 
 
 class CENetBlock(nn.Module):
@@ -82,13 +82,11 @@ class CENetBlock(nn.Module):
         return out + identity if self.shortcut else out
 
 
-class CENetDSEBBlock(nn.Module):
-    """DSEB-only ablation of :class:`CENetBlock`.
+class DSEB(nn.Module):
+    """Detail-sensitive edge enhancement block for YOLO neck features.
 
     This block keeps the FEA-style multi-scale edge residual and removes the
-    CFAM-style channel attention and multi-scale context branches. It is meant
-    only for ablation experiments, so the default CENetBlock behavior remains
-    untouched.
+    CFAM-style channel attention and multi-scale context branches.
     """
 
     def __init__(
@@ -98,7 +96,7 @@ class CENetDSEBBlock(nn.Module):
         edge_gain: float = 0.10,
         shortcut: bool = True,
     ):
-        """Initialize the DSEB-only ablation block."""
+        """Initialize the DSEB block."""
         super().__init__()
         c2 = c1 if c2 is None else c2
         self.shortcut = shortcut and c1 == c2
@@ -114,6 +112,62 @@ class CENetDSEBBlock(nn.Module):
         x = self.in_proj(x)
         edge = self.edge_proj(CENetBlock._edge_residual(x))
         out = self.out(x + self.edge_gain.to(dtype=x.dtype, device=x.device) * edge)
+        return out + identity if self.shortcut else out
+
+
+# Backward compatibility for checkpoints pickled with the old ablation class name.
+CENetDSEBBlock = DSEB
+
+
+class DSEBGated(nn.Module):
+    """Gated DSEB that learns where and which channels should receive edge enhancement."""
+
+    def __init__(
+        self,
+        c1: int,
+        c2: int | None = None,
+        edge_gain: float = 0.10,
+        gate_bias: float = 2.0,
+        reduction: int = 4,
+        shortcut: bool = True,
+    ):
+        """Initialize the gated DSEB block."""
+        super().__init__()
+        c2 = c1 if c2 is None else c2
+        c_mid = max(c2 // reduction, 16)
+        self.shortcut = shortcut and c1 == c2
+        self.edge_gain = nn.Parameter(torch.tensor(float(edge_gain)))
+
+        self.in_proj = Conv(c1, c2, 1, 1) if c1 != c2 else nn.Identity()
+        self.edge_proj = Conv(c2, c2, 3, 1)
+        self.spatial_gate = nn.Sequential(
+            Conv(c2 * 2, c_mid, 3, 1),
+            nn.Conv2d(c_mid, 1, 1, bias=True),
+        )
+        self.channel_gate = nn.Sequential(
+            nn.AdaptiveAvgPool2d(1),
+            nn.Conv2d(c2, c_mid, 1, bias=True),
+            nn.SiLU(inplace=True),
+            nn.Conv2d(c_mid, c2, 1, bias=True),
+        )
+        self.out = Conv(c2, c2, 3, 1)
+        self._init_gate(gate_bias)
+
+    def _init_gate(self, gate_bias: float) -> None:
+        """Start close to vanilla DSEB and let training learn selective suppression."""
+        for gate in (self.spatial_gate[-1], self.channel_gate[-1]):
+            nn.init.zeros_(gate.weight)
+            nn.init.constant_(gate.bias, float(gate_bias))
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Enhance a single YOLO neck feature map with gated edge residuals."""
+        identity = x
+        x = self.in_proj(x)
+        edge = self.edge_proj(CENetBlock._edge_residual(x))
+        spatial_weight = torch.sigmoid(self.spatial_gate(torch.cat((x, edge), 1)))
+        channel_weight = torch.sigmoid(self.channel_gate(x + edge))
+        gated_edge = edge * spatial_weight * channel_weight
+        out = self.out(x + self.edge_gain.to(dtype=x.dtype, device=x.device) * gated_edge)
         return out + identity if self.shortcut else out
 
 
