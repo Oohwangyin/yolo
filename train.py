@@ -1,17 +1,21 @@
 from ultralytics import YOLO
 
-model = YOLO("ultralytics/cfg/models/v8/yolov8s-P2P5.yaml")
+model = YOLO("ultralytics/cfg/models/v8/yolov8s-FAFM-Lite-DSEB.yaml")
 
 model.train(
-    data="VisDrone.yaml",
+    data="HIT-UAV.yaml",
     epochs=200,
     batch=16,
     imgsz=640,
-    patience=30,
     optimizer="SGD",
     pretrained=False,
     cos_lr=True,
     close_mosaic=20,
-    project="VisDrone2019/yolov8s-P2P5",
+    patience=30,
+    seed=0,
     deterministic=False,
+    device=0,
+    workers=8,
+    project="HIT-UAV/yolov8s-FAFM-Lite-DSEB/seed0",
+    exist_ok=False,
 )
