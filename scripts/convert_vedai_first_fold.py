@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import shutil
 from collections import Counter
 from pathlib import Path
@@ -17,8 +18,8 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
             "Create a YOLO-format VEDAI_NEW dataset from existing YOLO labels and "
-            "fold01/fold01test split files. RGB image names like 00000000_co.png "
-            "are copied as 00000000.png."
+            "fold01/fold01test split files. RGB images and labels are linked instead "
+            "of copied, and names like 00000000_co.png are linked as 00000000.png."
         )
     )
     parser.add_argument("--src", type=Path, default=Path("/root/autodl-tmp/datasets/VEDAI"), help="VEDAI root.")
@@ -72,6 +73,14 @@ def prepare_dst(dst: Path, overwrite: bool) -> None:
     for split in ("train", "test"):
         (dst / "images" / split).mkdir(parents=True, exist_ok=True)
         (dst / "labels" / split).mkdir(parents=True, exist_ok=True)
+
+
+def symlink_file(src: Path, dst: Path) -> None:
+    """Create a relative file symlink so fold directories do not duplicate dataset files."""
+    if dst.exists() or dst.is_symlink():
+        raise FileExistsError(f"Destination already exists: {dst}")
+    relative_src = os.path.relpath(src.resolve(), start=dst.parent.resolve())
+    dst.symlink_to(relative_src)
 
 
 def normalize_id(value: str) -> str:
@@ -168,7 +177,7 @@ def convert_split(
     missing_labels = 0
     empty_labels = 0
     invalid_label_lines = 0
-    copied_images = 0
+    linked_images = 0
 
     for stem in image_ids:
         src_image = image_index.get(stem)
@@ -177,8 +186,8 @@ def convert_split(
             continue
 
         dst_image = dst / "images" / split_name / f"{stem}{src_image.suffix.lower()}"
-        shutil.copy2(src_image, dst_image)
-        copied_images += 1
+        symlink_file(src_image, dst_image)
+        linked_images += 1
 
         label_path = dst / "labels" / split_name / f"{stem}.txt"
         src_label = label_index.get(stem)
@@ -186,7 +195,7 @@ def convert_split(
             missing_labels += 1
             label_path.write_text("", encoding="utf-8")
         else:
-            shutil.copy2(src_label, label_path)
+            symlink_file(src_label, label_path)
 
         counts, invalid = summarize_yolo_label(label_path)
         class_counts.update(counts)
@@ -196,7 +205,7 @@ def convert_split(
 
     return {
         "requested_images": len(image_ids),
-        "images": copied_images,
+        "images": linked_images,
         "instances": sum(class_counts.values()),
         "class_counts": class_counts,
         "missing_images": missing_images,
