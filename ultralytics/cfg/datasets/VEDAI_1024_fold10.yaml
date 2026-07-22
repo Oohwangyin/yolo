@@ -1,0 +1,14 @@
+path: /root/autodl-tmp/datasets/VEDAIdataset/VEDAI_1024_fold10
+train: images/train
+val: images/test
+test: images/test
+
+names:
+  0: car
+  1: pick-up
+  2: camping car
+  3: truck
+  4: vehicle
+  5: tractor
+  6: boat
+  7: van

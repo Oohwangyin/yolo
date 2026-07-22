@@ -1,0 +1,10 @@
+# UAVDT dataset converted to Ultralytics YOLO format
+path: /root/autodl-tmp/datasets/UAVDT-YOLO
+train: images/train
+val: images/val
+test: images/test
+
+names:
+  0: car
+  1: truck
+  2: bus
